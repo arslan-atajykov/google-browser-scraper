@@ -30,6 +30,7 @@ CONSENT_BUTTONS = (
 )
 NAV_TIMEOUT_MS = 60_000
 WARM_TIMEOUT_MS = 30_000
+TYPE_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -139,27 +140,54 @@ class BrowserSession:
     def search(self, query: str) -> Fetched:
         """Type `query` into Google's box and return the page it led to."""
         page = self.page
-        if not any(h.is_visible() for h in page.query_selector_all(SEARCH_BOX)):
+        if not self._box_visible():
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
-        dismissed = self._dismiss_consent()
-        # Act on the handle that was found, never on the selector again: the
-        # selector also matches a hidden field, and `page.click` would pick it.
-        box = page.wait_for_selector(SEARCH_BOX, state="visible", timeout=NAV_TIMEOUT_MS)
-        box.click()
-        # A results page keeps the previous query in the box. Typing after it
-        # appends, and the appended query returns a real page for the wrong
-        # question. Select it so the typing replaces it.
-        if box.input_value():
-            box.press("ControlOrMeta+a")
-        box.type(query, delay=self._rng.randint(45, 140))
-        typed = box.input_value()
-        if typed != query:
-            raise RuntimeError(f"search box holds {typed!r} after typing {query!r}; not submitting")
+        dismissed, typed = False, None
+        # The page can take focus or swap the box while the query is being
+        # typed, which leaves only its first characters behind. The box is
+        # found again and the query retyped once before giving up.
+        for _ in range(TYPE_ATTEMPTS):
+            dismissed = self._dismiss_consent() or dismissed
+            box = self._type_query(query)
+            try:
+                typed = box.input_value()
+            except Exception:
+                typed = None  # the box was replaced and this handle is gone
+            if typed == query:
+                break
+        else:
+            raise RuntimeError(
+                f"search box holds {typed!r} after typing {query!r} "
+                f"{TYPE_ATTEMPTS} times; not submitting"
+            )
         # `no_wait_after=True` keeps `press` from waiting for the navigation a
         # second time with Playwright's own 30 s default under ours.
         with page.expect_navigation(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS) as nav:
             box.press("Enter", no_wait_after=True, timeout=NAV_TIMEOUT_MS)
         return self._snapshot(nav.value, dismissed)
+
+    def _box_visible(self) -> bool:
+        try:
+            return any(h.is_visible() for h in self.page.query_selector_all(SEARCH_BOX))
+        except Exception:
+            # The page navigated while it was being read, as a warm-up page
+            # left idle can; the front page is loaded instead.
+            return False
+
+    def _type_query(self, query: str):
+        page = self.page
+        # Act on the handle that was found, never on the selector again: the
+        # selector also matches a hidden field, and `page.click` would pick it.
+        box = page.wait_for_selector(SEARCH_BOX, state="visible", timeout=NAV_TIMEOUT_MS)
+        box.click()
+        # A results page keeps the previous query in the box, and a failed
+        # attempt leaves part of this one. Typing after either appends, and the
+        # appended query returns a real page for the wrong question. Select it
+        # so the typing replaces it.
+        if box.input_value():
+            box.press("ControlOrMeta+a")
+        box.type(query, delay=self._rng.randint(45, 140))
+        return box
 
     def next_page(self) -> Fetched | None:
         """Click "Next" on the current results page, if there is one."""

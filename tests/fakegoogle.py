@@ -24,6 +24,27 @@ HOME = (
 </body></html>"""
 )
 
+# Front pages that interfere once, on the fifth character typed: one moves the
+# focus elsewhere, the other replaces the box with a fresh empty one. Either
+# leaves only the start of the query in the box the browser was typing into.
+_ONCE = """<script>
+let typed = 0, done = false;
+document.addEventListener('input', (event) => {
+  if (done || event.target.name !== 'q' || ++typed < 5) return;
+  done = true;
+  %s
+});
+</script>"""
+FOCUS_THIEF = HOME.replace(
+    "</body>",
+    '<button id="thief">x</button>'
+    + _ONCE % "document.getElementById('thief').focus();"
+    + "</body>",
+)
+BOX_SWAP = HOME.replace(
+    "</body>", _ONCE % "event.target.replaceWith(event.target.cloneNode(false));" + "</body>"
+)
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 - the stdlib's name
@@ -35,6 +56,10 @@ class Handler(BaseHTTPRequestHandler):
             body = body.replace(
                 '<div id="search">', f'<div id="search"><form action="/search">{box}</form>'
             )
+        elif parts.path == "/focus-thief":
+            body = FOCUS_THIEF
+        elif parts.path == "/box-swap":
+            body = BOX_SWAP
         else:
             body = HOME
         data = body.encode()

@@ -78,14 +78,14 @@ class FakeSession:
         return item
 
 
-def scraper(scripts, settings=None, warm_ok=True, events=None, relay=True):
+def scraper(scripts, settings=None, warm_ok=True, events=None, relay=True, cls=None):
     """One script per identity, consumed in mint order."""
     FakeSession.opened = []
     FakeRelay.by_address = {}
     scripts = list(scripts)
 
     def factory(proxy, **options):
-        return FakeSession(proxy, script=scripts.pop(0), warm_ok=warm_ok, **options)
+        return (cls or FakeSession)(proxy, script=scripts.pop(0), warm_ok=warm_ok, **options)
 
     return Scraper(
         ProxyTemplate("http://u-{session}:p@gate.example.com:7000"),
@@ -166,10 +166,39 @@ def test_unreachable_exit_counts_toward_the_breaker():
     assert all(not s.searched for s in FakeSession.opened)
 
 
-def test_browser_error_drops_the_exit():
-    records = list(scraper([[TimeoutError("nav")], [SERVED]]).run(["a"]))
+def test_a_browser_error_twice_running_drops_the_exit():
+    records = list(scraper([[TimeoutError("nav"), TimeoutError("nav")], [SERVED]]).run(["a"]))
     assert records[0]["search_metadata"]["status"] == "Success"
     assert FakeSession.opened[0].closed
+
+
+def test_a_browser_error_is_retried_once_on_the_same_exit_from_the_front_page():
+    events = []
+    s = scraper([[SERVED, TimeoutError("click"), SERVED]], events=events)
+    records = list(s.run(["a", "b"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success", "Success"]
+    (session,) = FakeSession.opened
+    assert session.searched == ["a", "b", "b"]
+    assert session.visited[-1] == "https://www.google.com/?hl=en"  # reloaded before the retry
+    assert records[1]["exit"]["queries_on_exit"] == 2
+    assert [e["error"] for e in events if e["event"] == "search_retry"] == ["TimeoutError: click"]
+
+
+def test_a_network_error_drops_the_exit_without_a_retry():
+    events = []
+    tunnel = RuntimeError("Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://www.google.com/")
+    records = list(scraper([[SERVED, tunnel], [SERVED]], events=events).run(["a", "b"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success", "Success"]
+    first, second = FakeSession.opened
+    assert first.searched == ["a", "b"] and first.closed
+    assert second.searched == ["b"]
+    assert not [e for e in events if e["event"] == "search_retry"]
+
+
+def test_a_served_exit_is_held_well_past_ten_queries_by_default():
+    queries = [f"q{i}" for i in range(30)]
+    list(scraper([[SERVED] * 30]).run(queries))
+    assert len(FakeSession.opened) == 1
 
 
 def test_extra_pages_follow_next_on_the_same_exit():
@@ -210,6 +239,8 @@ def test_events_name_sessions_and_never_carry_credentials():
         {"pages": 0},
         {"breaker": 0},
         {"gap_seconds": (5, 1)},
+        {"spare": -1},
+        {"spare": 4},
     ],
 )
 def test_settings_refuse_nonsense(bad):
@@ -328,6 +359,119 @@ def test_errors_are_one_line_with_credentials_masked():
 
 def test_a_browser_error_names_its_message_in_the_retired_event():
     events = []
-    list(scraper([[TimeoutError("navigation timed out")], [SERVED]], events=events).run(["a"]))
+    script = [TimeoutError("navigation timed out"), TimeoutError("navigation timed out")]
+    list(scraper([script, [SERVED]], events=events).run(["a"]))
     retired = [e for e in events if e["event"] == "retired"][0]
     assert retired["reason"] == "error: TimeoutError: navigation timed out"
+
+
+def spare_settings(**overrides):
+    return Settings(spare=1, gap_seconds=(0, 0), dwell_seconds=(0, 0), **overrides)
+
+
+def test_a_spare_warmed_in_the_background_replaces_a_capped_exit():
+    events = []
+    s = scraper([[SERVED, SERVED], [SERVED]], spare_settings(max_queries_per_exit=2), events=events)
+    records = list(s.run(["a", "b", "c"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success"] * 3
+    first, second = FakeSession.opened
+    assert first.searched == ["a", "b"] and second.searched == ["c"]
+    assert len(second.visited) == 6  # warmed before it was handed a query
+    minted = [e for e in events if e["event"] == "minted"]
+    assert "spare" not in minted[0]
+    assert minted[1]["spare"] is True and minted[1]["waited"] >= 0 and minted[1]["idle"] >= 0
+
+
+def test_a_spare_takes_over_from_an_exit_refused_later():
+    records = list(scraper([[SERVED, REFUSED], [SERVED]], spare_settings()).run(["a", "b"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success", "Success"]
+    assert [x.searched for x in FakeSession.opened] == [["a", "b"], ["b"]]
+
+
+def test_no_spare_is_warmed_when_nothing_is_left_to_ask():
+    list(scraper([[SERVED]], spare_settings()).run(["a"]))
+    assert len(FakeSession.opened) == 1
+
+
+def test_an_unused_spare_is_closed_and_its_traffic_counted():
+    events = []
+    s = scraper([[SERVED, SERVED], [SERVED]], spare_settings(), events=events)
+    list(s.run(["a", "b"]))
+    first, spare = FakeSession.opened
+    assert spare.searched == [] and first.closed and spare.closed
+    summary = s.stats.summary()
+    assert summary["identities"] == 2
+    spent = sum(r.total for r in FakeRelay.by_address.values())
+    assert summary["traffic_mb"] == round(spent / 2**20, 2)
+    assert [e["reason"] for e in events if e["event"] == "retired"][-1] == "spare unused"
+
+
+def test_a_spare_keeps_its_browser_on_one_thread_of_its_own():
+    import threading
+
+    class Recording(FakeSession):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.threads = {threading.get_ident()}
+
+        def __enter__(self):
+            self.threads.add(threading.get_ident())
+            return self
+
+        def visit(self, url, dwell):
+            self.threads.add(threading.get_ident())
+            return super().visit(url, dwell)
+
+        def search(self, query):
+            self.threads.add(threading.get_ident())
+            return super().search(query)
+
+        def close(self):
+            self.threads.add(threading.get_ident())
+            super().close()
+
+    s = scraper([[SERVED], [SERVED]], spare_settings(max_queries_per_exit=1), cls=Recording)
+    list(s.run(["a", "b"]))
+    first, spare = FakeSession.opened
+    assert spare.searched == ["b"]
+    assert first.threads == {threading.get_ident()}
+    assert len(spare.threads) == 1 and spare.threads != first.threads
+
+
+def test_closing_cuts_a_spare_warm_up_short():
+    import time as clock
+
+    class Slow(FakeSession):
+        def visit(self, url, dwell):
+            clock.sleep(0.2)
+            return super().visit(url, dwell)
+
+    s = scraper([[SERVED, SERVED], [SERVED]], spare_settings(), cls=Slow)
+    list(s.run(["a", "b"]))
+    first, spare = FakeSession.opened
+    assert len(first.visited) == 6
+    assert len(spare.visited) < 6 and spare.closed
+
+
+def test_a_spare_that_fails_to_launch_is_replaced_not_fatal():
+    events = []
+
+    class LaunchFails(FakeSession):
+        def __enter__(self):
+            if len(FakeSession.opened) == 2:
+                raise RuntimeError("browser did not start")
+            return self
+
+    s = scraper(
+        [[SERVED], [SERVED], [SERVED]],
+        spare_settings(max_queries_per_exit=1),
+        events=events,
+        cls=LaunchFails,
+    )
+    records = list(s.run(["a", "b"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success", "Success"]
+    first, spare, fresh = FakeSession.opened
+    assert spare.searched == [] and fresh.searched == ["b"]
+    assert [e["error"] for e in events if e["event"] == "spare_failed"] == [
+        "RuntimeError: browser did not start"
+    ]

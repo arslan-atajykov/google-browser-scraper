@@ -99,6 +99,15 @@ the cost per 1000 pages to the summary.
    exit it refuses is dropped and the query is retried on a new one. If exit
    after exit is refused, the run stops instead of spending more traffic.
 
+A served exit is kept for up to 50 queries (`--max-per-exit`). Every new exit
+pays for a warm-up, so a short cap mostly buys more warm-up traffic. A browser
+error on a search is retried once from Google's front page before the exit is
+dropped; a network error drops it at once.
+
+`--spare 1` warms the next exit in the background once the current one is
+served, so a retired exit is replaced without waiting for a warm-up. A spare
+costs a warm-up's traffic whether it is used or not.
+
 Google wraps result links in encrypted `/goto` redirects. Each one is resolved
 with a small request through a separate short-lived proxy session, so link
 resolution does not touch the warmed browser session. `--no-resolve-links`

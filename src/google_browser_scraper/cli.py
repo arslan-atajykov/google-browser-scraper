@@ -108,8 +108,16 @@ def _scraper_options(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--max-per-exit",
         type=int,
-        default=10,
-        help="queries before an exit is retired even if still served",
+        default=50,
+        help="queries before an exit is retired even if still served (default 50)",
+    )
+    p.add_argument(
+        "--spare",
+        type=int,
+        default=0,
+        metavar="N",
+        help="exits to warm in the background while the current one serves, so a "
+        "retired exit is replaced without waiting (default 0; each costs a warm-up)",
     )
     p.add_argument(
         "--gap",
@@ -180,6 +188,7 @@ def _build(args, *, pages: int = 1) -> tuple[Scraper, str]:
         warmup=args.warmup,
         pages=pages,
         max_queries_per_exit=args.max_per_exit,
+        spare=args.spare,
         gap_seconds=args.gap,
         headless=args.headless,
         channel=args.channel,

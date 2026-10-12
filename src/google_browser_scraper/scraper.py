@@ -7,6 +7,10 @@ a refused one is worth nothing - retrying it only burns the address further.
 
 Traffic is counted by a loopback relay per identity (see `relay`);
 `use_relay=False` hands the proxy to the browser directly instead.
+
+With `spare` set, the next identities are warmed in the background while the
+current one serves, so a retired exit is replaced without waiting for a
+warm-up.
 """
 
 from __future__ import annotations
@@ -14,13 +18,16 @@ from __future__ import annotations
 import gzip
 import random
 import re
+import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import engines
+from . import browser, engines
 from . import warmup as ladder
 from .classify import Verdict, classify
 from .links import LinkResolver
@@ -30,9 +37,12 @@ from .proxy import ProxySource, new_session_id
 from .relay import Relay
 
 MB = 1024 * 1024
+MAX_SPARES = 3
 
 
 _CREDENTIALS = re.compile(r"//[^/\s:@]+:[^@\s]+@")
+#: Chromium's own network failures: the tunnel, TLS or the connection broke.
+_NETWORK_ERROR = re.compile(r"net::ERR_")
 
 
 def describe_error(exc: BaseException) -> str:
@@ -57,7 +67,9 @@ class Settings:
     engine: str = engines.DEFAULT_ENGINE
     warmup: str = ladder.DEFAULT
     pages: int = 1
-    max_queries_per_exit: int = 10
+    #: Each retirement throws away a warm-up worth tens of pages of traffic,
+    #: and a served exit keeps being served far past ten queries.
+    max_queries_per_exit: int = 50
     max_exits_per_query: int = 3
     breaker: int = 6
     gap_seconds: tuple[float, float] = (8.0, 20.0)
@@ -74,6 +86,10 @@ class Settings:
     #: Ask Google's /goto redirect for each result's destination, from a proxy
     #: session of its own; pages no longer carry the URLs themselves.
     resolve_links: bool = True
+    #: Identities to warm in the background once the current one is served,
+    #: so the next exit is ready when this one is retired. Each costs a
+    #: warm-up's traffic whether it is used or not.
+    spare: int = 0
 
     def __post_init__(self) -> None:
         engines.get(self.engine)
@@ -81,6 +97,8 @@ class Settings:
         for name in ("pages", "max_queries_per_exit", "max_exits_per_query", "breaker"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name} must be at least 1")
+        if not 0 <= self.spare <= MAX_SPARES:
+            raise ValueError(f"spare must be between 0 and {MAX_SPARES}")
         for name in ("gap_seconds", "dwell_seconds"):
             low, high = getattr(self, name)
             if not 0 <= low <= high:
@@ -97,6 +115,8 @@ class Identity:
     warm_bytes: int | None
     queries: int = 0
     consent_dismissed: bool = False
+    warm_seconds: float = 0.0
+    ready_at: float = 0.0
 
     def bytes(self) -> int | None:
         return self.relay.total if self.relay is not None else None
@@ -151,6 +171,45 @@ class Stats:
         return out
 
 
+class Pinned:
+    """A browser session whose every call runs on one thread of its own.
+
+    Playwright's sync API is bound to the thread that started it. A spare is
+    warmed on a background thread and searched later from the caller's, so each
+    spare gets a thread that owns its browser from launch to close.
+    """
+
+    def __init__(self, make: Callable[[], Any]) -> None:
+        self._thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gbs-identity")
+        try:
+            self.session = self._call(make)
+        except BaseException:
+            self._thread.shutdown(wait=False)
+            raise
+
+    def _call(self, fn: Callable[..., Any], *args: Any) -> Any:
+        return self._thread.submit(fn, *args).result()
+
+    def __enter__(self) -> Pinned:
+        self._call(self.session.__enter__)
+        return self
+
+    def visit(self, url: str, dwell_seconds: float) -> bool:
+        return self._call(self.session.visit, url, dwell_seconds)
+
+    def search(self, query: str) -> Any:
+        return self._call(self.session.search, query)
+
+    def next_page(self) -> Any:
+        return self._call(self.session.next_page)
+
+    def close(self) -> None:
+        try:
+            self._call(self.session.close)
+        finally:
+            self._thread.shutdown(wait=False)
+
+
 class Scraper:
     """Run queries through a pool of browser identities.
 
@@ -180,6 +239,9 @@ class Scraper:
         self._rng = rng or random.Random()
         self._emit = on_event or (lambda event: None)
         self._identity: Identity | None = None
+        self._spares: deque[Future] = deque()
+        self._warmer: ThreadPoolExecutor | None = None
+        self._cancel = threading.Event()
         self._failed_exits = 0
         self._saved = 0
         self.stats = Stats()
@@ -189,10 +251,14 @@ class Scraper:
     def run(self, queries: Iterable[str]) -> Iterator[dict[str, Any]]:
         """Yield one record per results page, then close the last identity."""
         try:
-            for query in queries:
-                query = query.strip()
-                if query:
-                    yield from self._query(query)
+            pending = (q.strip() for q in queries)
+            pending = (q for q in pending if q)
+            query = next(pending, None)
+            while query is not None:
+                following = next(pending, None)
+                # No spare is warmed for a run that has nothing left to ask.
+                yield from self._query(query, more=following is not None)
+                query = following
         finally:
             self.close()
 
@@ -210,6 +276,7 @@ class Scraper:
     def close(self) -> None:
         if self._identity is not None:
             self._retire("run finished")
+        self._discard_spares()
         if self._resolver is not None:
             self._resolver.close()
             self.stats.bytes_total += self._resolver.bytes
@@ -219,7 +286,7 @@ class Scraper:
 
     # -- one query -----------------------------------------------------------
 
-    def _query(self, query: str) -> Iterator[dict[str, Any]]:
+    def _query(self, query: str, more: bool = True) -> Iterator[dict[str, Any]]:
         s = self.settings
         last_verdict: Verdict | None = None
         last_error: str | None = None
@@ -232,7 +299,7 @@ class Scraper:
                 self._sleep(self._rng.uniform(*s.gap_seconds))
             started, before = time.monotonic(), identity.bytes()
             try:
-                fetched = identity.session.search(query)
+                fetched = self._search(identity, query)
             except Exception as exc:
                 last_error = describe_error(exc)
                 self._retire(f"error: {describe_error(exc)}")
@@ -245,6 +312,8 @@ class Scraper:
             saved = self._keep(fetched, query, 1, verdict)
             if verdict.served:
                 self._failed_exits = 0
+                if more:
+                    self._top_up()
                 yield self._served(query, 1, fetched, verdict, identity, started, before, saved)
                 yield from self._more_pages(query, identity)
                 if self._identity is identity and identity.queries >= s.max_queries_per_exit:
@@ -266,6 +335,26 @@ class Scraper:
             exit_info={"session": None},
             error=last_error or f"refused on {s.max_exits_per_query} exits: {reason}",
         )
+
+    def _search(self, identity: Identity, query: str):
+        """Search on this identity, once more from Google's front page if the
+        browser fails.
+
+        A browser error is not Google's answer: a click that timed out under an
+        overlay says nothing about the exit. Retiring on it throws away a
+        warm-up that costs far more than one more page.
+
+        A network error is the exception: the proxy or the exit failed, and a
+        second page through it fails the same way after another full timeout.
+        """
+        try:
+            return identity.session.search(query)
+        except Exception as exc:
+            if _NETWORK_ERROR.search(str(exc)):
+                raise
+            self._event("search_retry", identity, error=describe_error(exc))
+            identity.session.visit(browser.HOME_URL, 0)
+            return identity.session.search(query)
 
     def _more_pages(self, query: str, identity: Identity) -> Iterator[dict[str, Any]]:
         for page in range(2, self.settings.pages + 1):
@@ -352,47 +441,83 @@ class Scraper:
 
     def _current_identity(self) -> Identity | None:
         if self._identity is None:
-            self._identity = self._mint()
+            self._identity = self._take_spare() if self._spares else self._mint()
         return self._identity
 
     def _mint(self) -> Identity | None:
+        return self._adopt(self._warm(pinned=False))
+
+    def _warm(self, pinned: bool) -> Identity:
+        """Launch a browser on a new sticky session and walk the warm-up ladder.
+
+        Touches no scraper state beyond the relay decision, so it can run on a
+        background thread; the identity is counted when it is adopted.
+        """
         s = self.settings
         session_id = new_session_id()
         upstream = self.proxy.for_session(session_id) if self.proxy is not None else None
         relay, browser_proxy = self._relay_for(upstream)
         started = time.monotonic()
-        session = self._factory(
-            browser_proxy,
-            headless=s.headless,
-            channel=s.channel,
-            timezone_id=s.timezone_id,
-            browser_args=s.browser_args,
-            rng=self._rng,
-        )
+
+        def make() -> Any:
+            return self._factory(
+                browser_proxy,
+                headless=s.headless,
+                channel=s.channel,
+                timezone_id=s.timezone_id,
+                browser_args=s.browser_args,
+                rng=self._rng,
+            )
+
         try:
-            session.__enter__()
+            session = Pinned(make) if pinned else make()
         except Exception:
             if relay is not None:
                 relay.stop()
             raise
-        self.stats.identities += 1
+        try:
+            session.__enter__()
+        except Exception:
+            if pinned:
+                session.close()
+            if relay is not None:
+                relay.stop()
+            raise
         pages = ladder.pages(s.warmup)
-        delivered = sum(
-            bool(session.visit(url, self._rng.uniform(*s.dwell_seconds))) for url in pages
-        )
+        delivered = 0
+        for url in pages:
+            if pinned and self._cancel.is_set():
+                break  # the run is closing; stop paying for a spare nobody will use
+            delivered += bool(session.visit(url, self._rng.uniform(*s.dwell_seconds)))
         warm_bytes = relay.total if relay is not None else None
-        self.stats.bytes_warm += warm_bytes or 0
-        identity = Identity(session_id, session, relay, len(pages), delivered, warm_bytes)
+        return Identity(
+            session_id,
+            session,
+            relay,
+            len(pages),
+            delivered,
+            warm_bytes,
+            warm_seconds=round(time.monotonic() - started, 1),
+            ready_at=time.monotonic(),
+        )
+
+    def _count_in(self, identity: Identity, **spare: Any) -> None:
+        self.stats.identities += 1
+        self.stats.bytes_warm += identity.warm_bytes or 0
         self.stats._open.append(identity)
         self._event(
             "minted",
             identity,
-            warm_delivered=delivered,
-            warm_pages=len(pages),
-            warm_bytes=warm_bytes,
-            seconds=round(time.monotonic() - started, 1),
+            warm_delivered=identity.warm_delivered,
+            warm_pages=identity.warm_pages,
+            warm_bytes=identity.warm_bytes,
+            seconds=identity.warm_seconds,
+            **spare,
         )
-        if pages and not delivered:
+
+    def _adopt(self, identity: Identity, **spare: Any) -> Identity | None:
+        self._count_in(identity, **spare)
+        if identity.warm_pages and not identity.warm_delivered:
             # Nothing arrived: the proxy is down, the credentials are wrong or
             # the exit is dead. Not Google's verdict, but just as final.
             self._identity = identity
@@ -420,10 +545,59 @@ class Scraper:
         relay = self._relay_factory(upstream)
         return relay, {"server": relay.start()}
 
+    # -- spares --------------------------------------------------------------
+
+    def _top_up(self) -> None:
+        """Start warming spares in the background, up to `settings.spare`."""
+        if not self.settings.spare:
+            return
+        if self._warmer is None:
+            self._warmer = ThreadPoolExecutor(
+                max_workers=self.settings.spare, thread_name_prefix="gbs-warm"
+            )
+        while len(self._spares) < self.settings.spare:
+            self._spares.append(self._warmer.submit(self._warm, True))
+
+    def _take_spare(self) -> Identity | None:
+        """The oldest spare, waiting for its warm-up if it is still running."""
+        future = self._spares.popleft()
+        asked = time.monotonic()
+        try:
+            identity = future.result()
+        except Exception as exc:
+            # A spare that failed in the background is not a reason to stop
+            # the run; the identity is made here instead, as without spares.
+            self._emit({"event": "spare_failed", "error": describe_error(exc)})
+            return self._mint()
+        now = time.monotonic()
+        return self._adopt(
+            identity,
+            spare=True,
+            waited=round(now - asked, 1),
+            idle=round(max(0.0, now - identity.ready_at), 1),
+        )
+
+    def _discard_spares(self) -> None:
+        """Close spares nobody used. Their warm-up was paid for, so it is counted."""
+        self._cancel.set()
+        while self._spares:
+            try:
+                identity = self._spares.popleft().result()
+            except Exception:
+                continue
+            self._count_in(identity, spare=True)
+            self._close_identity(identity, "spare unused")
+        if self._warmer is not None:
+            self._warmer.shutdown(wait=True)
+            self._warmer = None
+        self._cancel = threading.Event()
+
     def _retire(self, reason: str) -> None:
         identity, self._identity = self._identity, None
-        if identity is None:
-            return
+        if identity is not None:
+            self._close_identity(identity, reason)
+
+    def _close_identity(self, identity: Identity, reason: str) -> None:
         try:
             identity.session.close()
         finally:

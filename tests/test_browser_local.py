@@ -46,3 +46,29 @@ def test_type_search_replace_and_paginate(local_google):
         assert nxt is not None and "start=10" in nxt.url
     finally:
         session.close()
+
+
+@pytest.mark.parametrize("front", ["/focus-thief", "/box-swap"])
+def test_a_query_cut_short_while_typing_is_typed_again(local_google, monkeypatch, front):
+    monkeypatch.setattr(browser, "HOME_URL", local_google + front)
+    try:
+        session = browser.BrowserSession(None, headless=True).__enter__()
+    except Exception as exc:  # browser binary missing on this machine
+        pytest.skip(f"no Patchright browser: {exc}")
+    try:
+        fetched = session.search("swim lessons")
+        assert "q=swim+lessons" in fetched.url
+    finally:
+        session.close()
+
+
+def test_a_page_navigating_during_the_box_check_sends_the_browser_home():
+    class Navigating:
+        def query_selector_all(self, selector):
+            raise RuntimeError(
+                "Execution context was destroyed, most likely because of a navigation"
+            )
+
+    session = browser.BrowserSession(None)
+    session.page = Navigating()
+    assert session._box_visible() is False

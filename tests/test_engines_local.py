@@ -83,3 +83,26 @@ def test_engine_end_to_end_through_the_relay(engine, local_google):
     summary = scraper.stats.summary()
     assert summary["identities"] == 1 and summary["pages_served"] == 4
     assert summary["traffic_mb"] > 0
+
+
+def test_a_spare_browser_launched_on_another_thread_serves_the_next_query(local_google):
+    try:
+        importlib.import_module(PACKAGES["patchright"])
+    except ImportError:
+        pytest.skip("patchright is not installed")
+    settings = Settings(
+        warmup="off",
+        max_queries_per_exit=1,
+        spare=1,
+        headless=True,
+        gap_seconds=(0, 0),
+        dwell_seconds=(0, 0),
+        browser_args=("--proxy-bypass-list=<-loopback>",),
+        resolve_links=False,
+    )
+    scraper = Scraper(None, settings)
+    records = list(scraper.run(["swim lessons", "pool near me"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success", "Success"]
+    first, second = (r["exit"]["session"] for r in records)
+    assert first != second  # the capped exit was replaced by the spare
+    assert scraper.stats.summary()["identities"] == 2

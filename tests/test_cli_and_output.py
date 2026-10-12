@@ -74,6 +74,7 @@ def test_parse_command_refuses_to_parse_a_refusal(tmp_path, capsys):
         ["search"],
         ["search", "q"],
         ["search", "q", "--proxy", "http://u:p@h:1", "--country", "us"],
+        ["search", "q", "--no-proxy", "--spare", "9"],
     ],
 )
 def test_search_argument_errors(argv, capsys, monkeypatch):
