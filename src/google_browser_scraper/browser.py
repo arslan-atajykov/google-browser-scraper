@@ -15,7 +15,7 @@ import random
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 HOME_URL = "https://www.google.com/?hl=en"
 SEARCH_BOX = "textarea[name='q'], input[name='q']"
@@ -198,8 +198,7 @@ class BrowserSession:
             box.press("Enter", no_wait_after=True, timeout=NAV_TIMEOUT_MS)
         timings["load"] = round(time.monotonic() - mark, 2)
         fetched = self._snapshot(nav.value, dismissed)
-        fetched.timings = {**timings, **fetched.timings}
-        return fetched
+        return replace(fetched, timings={**timings, **fetched.timings})
 
     def _box_visible(self) -> bool:
         try:
@@ -236,8 +235,7 @@ class BrowserSession:
             link.click()
         load = round(time.monotonic() - mark, 2)
         fetched = self._snapshot(nav.value, False)
-        fetched.timings = {"load": load, **fetched.timings}
-        return fetched
+        return replace(fetched, timings={"load": load, **fetched.timings})
 
     def _snapshot(self, response, dismissed: bool) -> Fetched:
         # Google builds results in the browser; reading at domcontentloaded
