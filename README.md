@@ -84,7 +84,9 @@ simple consumers can often switch with minimal mapping. Knowledge panels,
 shopping, images and other special blocks are not parsed.
 
 Each record also has an `exit` block: which proxy session answered and how many
-bytes the page cost. A query that failed is a record too, with an `error`.
+bytes the page cost. `search_metadata.timings` says where the page's time went,
+in seconds per step (`type`, `load`, `ready`, `read`, `parse`, `links`). A query
+that failed is a record too, with an `error`.
 `--format csv` writes the organic results as a table, and `--price-per-gb` adds
 the cost per 1000 pages to the summary.
 
@@ -121,9 +123,9 @@ served, so a retired exit is replaced without waiting for a warm-up. A spare
 costs a warm-up's traffic whether it is used or not.
 
 Google wraps result links in encrypted `/goto` redirects. Each one is resolved
-with a small request through a separate short-lived proxy session, so link
-resolution does not touch the warmed browser session. `--no-resolve-links`
-skips it.
+with a small request through a separate short-lived proxy session, a few at a
+time, so link resolution does not touch the warmed browser session.
+`--no-resolve-links` skips it.
 
 Traffic goes through a small local relay that counts bytes and blocks a large
 model download Chrome otherwise makes on every fresh profile.

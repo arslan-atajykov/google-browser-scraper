@@ -35,6 +35,7 @@ def test_type_search_replace_and_paginate(local_google):
         assert first.consent_dismissed
         assert "q=swim+lessons" in first.url
         assert classify("https://www.google.com/search", first.html).served
+        assert {"home", "type", "load", "ready", "read"} <= set(first.timings)
 
         # The results page keeps the last query in its box; the second query
         # must replace it, not append to it.
@@ -44,6 +45,7 @@ def test_type_search_replace_and_paginate(local_google):
 
         nxt = session.next_page()
         assert nxt is not None and "start=10" in nxt.url
+        assert {"load", "ready", "read"} <= set(nxt.timings)
     finally:
         session.close()
 

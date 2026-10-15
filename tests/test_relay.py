@@ -40,8 +40,11 @@ def _read_head(sock):
 def echo():
     def handle(conn):
         with conn:
-            while data := conn.recv(4096):
-                conn.sendall(data)
+            try:
+                while data := conn.recv(4096):
+                    conn.sendall(data)
+            except OSError:
+                pass  # the other side reset the connection on close
 
     server, port = _serve(handle)
     yield port
@@ -64,9 +67,20 @@ def upstream(echo):
             target = socket.create_connection(("127.0.0.1", echo))
             conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
             with target:
-                while data := conn.recv(4096):
-                    target.sendall(data)
-                    conn.sendall(target.recv(4096))
+
+                def back():
+                    try:
+                        while data := target.recv(4096):
+                            conn.sendall(data)
+                    except OSError:
+                        pass
+
+                threading.Thread(target=back, daemon=True).start()
+                try:
+                    while data := conn.recv(4096):
+                        target.sendall(data)
+                except OSError:
+                    pass  # the relay closed its side
 
     server, port = _serve(handle)
     yield port, seen
@@ -81,7 +95,14 @@ def _tunnel(relay_address, authority, payload=b"hello"):
         if " 200 " not in head.split("\r\n")[0] + " ":
             return head, b""
         sock.sendall(payload)
-        return head, sock.recv(4096)
+        # The echo can come back in more than one segment under load.
+        echoed = b""
+        while len(echoed) < len(payload):
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            echoed += chunk
+        return head, echoed
 
 
 def test_tunnel_authenticates_upstream_and_counts_both_ways(upstream, echo):

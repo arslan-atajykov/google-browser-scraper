@@ -15,7 +15,7 @@ import random
 import shutil
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 HOME_URL = "https://www.google.com/?hl=en"
 SEARCH_BOX = "textarea[name='q'], input[name='q']"
@@ -41,6 +41,8 @@ class Fetched:
     status: int | None
     html: str
     consent_dismissed: bool = False
+    #: Seconds per step, e.g. {"type": 3.1, "load": 4.2}: where the time went.
+    timings: dict[str, float] = field(default_factory=dict)
 
 
 class BrowserSession:
@@ -164,8 +166,12 @@ class BrowserSession:
     def search(self, query: str) -> Fetched:
         """Type `query` into Google's box and return the page it led to."""
         page = self.page
+        timings: dict[str, float] = {}
+        mark = time.monotonic()
         if not self._box_visible():
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            timings["home"] = round(time.monotonic() - mark, 2)
+            mark = time.monotonic()
         dismissed, typed = False, None
         # The page can take focus or swap the box while the query is being
         # typed, which leaves only its first characters behind. The box is
@@ -184,11 +190,16 @@ class BrowserSession:
                 f"search box holds {typed!r} after typing {query!r} "
                 f"{TYPE_ATTEMPTS} times; not submitting"
             )
+        timings["type"] = round(time.monotonic() - mark, 2)
+        mark = time.monotonic()
         # `no_wait_after=True` keeps `press` from waiting for the navigation a
         # second time with Playwright's own 30 s default under ours.
         with page.expect_navigation(wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS) as nav:
             box.press("Enter", no_wait_after=True, timeout=NAV_TIMEOUT_MS)
-        return self._snapshot(nav.value, dismissed)
+        timings["load"] = round(time.monotonic() - mark, 2)
+        fetched = self._snapshot(nav.value, dismissed)
+        fetched.timings = {**timings, **fetched.timings}
+        return fetched
 
     def _box_visible(self) -> bool:
         try:
@@ -218,25 +229,34 @@ class BrowserSession:
         link = self.page.query_selector("a#pnnext")
         if link is None or not link.is_visible():
             return None
+        mark = time.monotonic()
         with self.page.expect_navigation(
             wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS
         ) as nav:
             link.click()
-        return self._snapshot(nav.value, False)
+        load = round(time.monotonic() - mark, 2)
+        fetched = self._snapshot(nav.value, False)
+        fetched.timings = {"load": load, **fetched.timings}
+        return fetched
 
     def _snapshot(self, response, dismissed: bool) -> Fetched:
         # Google builds results in the browser; reading at domcontentloaded
         # catches the "enable JavaScript" scaffold. A refusal never grows the
         # container, so the short timeout is expected to expire on those.
+        mark = time.monotonic()
         try:
             self.page.wait_for_selector(READY, state="attached", timeout=8_000)
         except Exception:
             pass
+        ready = round(time.monotonic() - mark, 2)
+        mark = time.monotonic()
+        html = self.page.content()
         return Fetched(
             url=self.page.url,
             status=response.status if response is not None else None,
-            html=self.page.content(),
+            html=html,
             consent_dismissed=dismissed,
+            timings={"ready": ready, "read": round(time.monotonic() - mark, 2)},
         )
 
     def _dismiss_consent(self) -> bool:

@@ -11,9 +11,11 @@ through a relay so it is counted like everything else.
 
 from __future__ import annotations
 
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -24,6 +26,8 @@ UA = (
     "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
 TIMEOUT_S = 30
+#: /goto links resolved at once for one page.
+PARALLEL = 4
 
 
 class _AlwaysProxy(urllib.request.ProxyHandler):
@@ -61,6 +65,7 @@ class LinkResolver:
         timeout: float = TIMEOUT_S,
     ) -> None:
         self._relay = None
+        self._lock = threading.Lock()
         self.resolved = 0
         self.failed = 0
         proxy_url = None
@@ -103,22 +108,36 @@ class LinkResolver:
             location = err.headers.get("Location") if 300 <= err.code < 400 else None
             err.read()
         except Exception:
-            self.failed += 1
+            with self._lock:
+                self.failed += 1
             return None
         host = urlsplit(location or "").netloc.lower()
         if not location or "/sorry" in location or host.startswith(("sorry.", "consent.")):
-            self.failed += 1
-            self.enabled = False
+            with self._lock:
+                self.failed += 1
+                self.enabled = False
             return None
-        self.resolved += 1
+        with self._lock:
+            self.resolved += 1
         return location
 
     def fill(self, results: list[dict[str, Any]]) -> None:
-        """Resolve every result that has a /goto redirect and no link yet."""
-        for result in results:
-            redirect = result.get("redirect_link") or ""
-            if result.get("link") is None and "/goto?" in redirect:
-                result["link"] = self.resolve(redirect)
+        """Resolve every result that has a /goto redirect and no link yet.
+
+        Up to PARALLEL requests run at once. A refusal disables the resolver,
+        so the requests still queued behind it are not sent.
+        """
+        todo = [
+            r
+            for r in results
+            if r.get("link") is None and "/goto?" in (r.get("redirect_link") or "")
+        ]
+        if not todo:
+            return
+        with ThreadPoolExecutor(max_workers=min(PARALLEL, len(todo))) as pool:
+            links = list(pool.map(lambda r: self.resolve(r["redirect_link"]), todo))
+        for result, link in zip(todo, links, strict=True):
+            result["link"] = link
 
     def close(self) -> None:
         if self._relay is not None:

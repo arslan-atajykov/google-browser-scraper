@@ -1,6 +1,7 @@
 """The /goto resolver against a local server that answers like Google."""
 
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -86,3 +87,26 @@ def test_an_upstream_the_relay_cannot_speak_disables_resolving():
     assert not resolver.enabled
     assert resolver.resolve("https://www.google.com/goto?url=x") is None
     resolver.close()
+
+
+def test_fill_resolves_several_links_at_once_and_keeps_their_order():
+    resolver = LinkResolver(None, relay_factory=None)
+    running, peak = [0], [0]
+    lock = threading.Lock()
+
+    def slow(url):
+        with lock:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        time.sleep(0.05)
+        with lock:
+            running[0] -= 1
+        return url.replace("https://www.google.com/goto?url=", "")
+
+    resolver.resolve = slow
+    results = [
+        {"redirect_link": f"https://www.google.com/goto?url=https://e{i}.com/"} for i in range(8)
+    ]
+    resolver.fill(results)
+    assert [r["link"] for r in results] == [f"https://e{i}.com/" for i in range(8)]
+    assert peak[0] > 1

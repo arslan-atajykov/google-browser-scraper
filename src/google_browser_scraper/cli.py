@@ -145,9 +145,9 @@ def _scraper_options(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--gap",
         type=_pair,
-        default=(8.0, 20.0),
+        default=(2.0, 5.0),
         metavar="LOW,HIGH",
-        help="seconds between queries on one exit (default 8,20)",
+        help="seconds between queries on one exit (default 2,5)",
     )
     p.add_argument(
         "--headless",
@@ -328,7 +328,7 @@ def _pair(text: str) -> tuple[float, float]:
     try:
         low, high = (float(x) for x in text.split(","))
     except ValueError:
-        raise argparse.ArgumentTypeError("expected LOW,HIGH, e.g. 8,20") from None
+        raise argparse.ArgumentTypeError("expected LOW,HIGH, e.g. 2,5") from None
     return low, high
 
 

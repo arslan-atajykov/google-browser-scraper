@@ -57,6 +57,7 @@ def build_record(
     parsed: dict[str, Any] | None = None,
     error: str | None = None,
     hl: str = "en",
+    timings: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     ok = error is None and parsed is not None
     record: dict[str, Any] = {
@@ -77,6 +78,9 @@ def build_record(
             "device": "desktop",
         },
     }
+    if timings:
+        # Seconds per step of this page: home, type, load, ready, read, parse, links.
+        record["search_metadata"]["timings"] = timings
     if parsed:
         record.update(parsed)
     record["exit"] = exit_info

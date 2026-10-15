@@ -662,3 +662,11 @@ def test_a_profile_with_no_cookie_database_leaves_no_template():
     assert len(failed) == 2 and "no cookie database" in failed[0]["error"]
     assert s.stats.clones == 0
     assert all(len(f.visited) == 6 for f in FakeSession.opened)  # each warmed itself
+
+
+def test_a_record_says_where_its_time_went():
+    timed = Fetched(SEARCH, 200, pages.results_page(), timings={"type": 2.5, "load": 3.0})
+    record = next(iter(scraper([[timed]]).run(["a"])))
+    timings = record["search_metadata"]["timings"]
+    assert timings["type"] == 2.5 and timings["load"] == 3.0
+    assert "parse" in timings and "links" not in timings  # no resolver in these tests

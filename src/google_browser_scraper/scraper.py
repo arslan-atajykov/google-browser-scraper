@@ -158,7 +158,7 @@ class Settings:
     max_queries_per_exit: int = 50
     max_exits_per_query: int = 3
     breaker: int = 6
-    gap_seconds: tuple[float, float] = (8.0, 20.0)
+    gap_seconds: tuple[float, float] = (2.0, 5.0)
     dwell_seconds: tuple[float, float] = ladder.DWELL_SECONDS
     headless: bool = False
     channel: str | None = None
@@ -533,10 +533,15 @@ class Scraper:
         after = identity.bytes()
         page_bytes = after - before if after is not None and before is not None else None
         self.stats.pages_served += 1
+        timings = dict(getattr(fetched, "timings", None) or {})
+        mark = time.monotonic()
         parsed = parse_serp(fetched.html)
+        timings["parse"] = round(time.monotonic() - mark, 2)
         resolver = self._links()
         if resolver is not None:
+            mark = time.monotonic()
             resolver.fill(parsed["organic_results"])
+            timings["links"] = round(time.monotonic() - mark, 2)
         record = build_record(
             query,
             page=page,
@@ -546,6 +551,7 @@ class Scraper:
             elapsed=time.monotonic() - started,
             exit_info=identity.info(self.settings.warmup, page_bytes),
             parsed=parsed,
+            timings=timings,
         )
         if saved:
             record["search_metadata"]["raw_html_file"] = saved
