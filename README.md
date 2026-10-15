@@ -104,6 +104,18 @@ pays for a warm-up, so a short cap mostly buys more warm-up traffic. A browser
 error on a search is retried once from Google's front page before the exit is
 dropped; a network error drops it at once.
 
+`--workers N` searches on N exits at once, one browser each, sharing one list
+of queries. Each browser needs memory and CPU of its own; if exit after exit is
+refused on any worker, the whole run stops.
+
+The command line copies the cookies of the first exit Google serves and
+starts up to 10 new exits from that copy (`--clone N`, `--clone 0` turns it
+off), on new sticky sessions, instead of warming each one. Google's acceptance follows the cookies more than the
+address, so a copy usually starts out served, and costs a few MB instead of a
+full warm-up. A copy refused on its first query ends the copying; the copied
+cookies are used for an hour at most (`--clone-max-age`). A copy waits 40-60
+seconds after its browser starts before the first search.
+
 `--spare 1` warms the next exit in the background once the current one is
 served, so a retired exit is replaced without waiting for a warm-up. A spare
 costs a warm-up's traffic whether it is used or not.

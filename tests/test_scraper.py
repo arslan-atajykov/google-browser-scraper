@@ -1,11 +1,14 @@
 """The identity lifecycle, with a fake browser and no clock."""
 
+import os
+import tempfile
+
 import pages
 import pytest
 
 from google_browser_scraper.browser import Fetched
 from google_browser_scraper.proxy import ProxyTemplate
-from google_browser_scraper.scraper import ExitsRefused, Scraper, Settings
+from google_browser_scraper.scraper import ExitsRefused, ProxyRefused, Scraper, Settings
 
 SEARCH = "https://www.google.com/search?q=x"
 SERVED = Fetched(SEARCH, 200, pages.results_page())
@@ -18,8 +21,12 @@ class FakeRelay:
 
     by_address = {}
 
+    #: What the next relay's upstream proxy answers to CONNECT when refusing.
+    refusal = None
+
     def __init__(self, upstream):
         self.upstream, self.total, self.stopped = upstream, 0, False
+        self.refusal = FakeRelay.refusal
 
     def start(self):
         address = f"http://127.0.0.1:{len(FakeRelay.by_address) + 1}"
@@ -33,6 +40,10 @@ class FakeRelay:
 WARM_BYTES, PAGE_BYTES = 1_000, 500_000
 
 
+COOKIES = os.path.join("Default", "Network", "Cookies")
+CACHE = os.path.join("Default", "Cache", "data_0")
+
+
 class FakeSession:
     """Plays a scripted sequence of pages; records what it was asked."""
 
@@ -43,6 +54,23 @@ class FakeSession:
         self.relay = FakeRelay.by_address.get((proxy or {}).get("server"))
         self.script, self.warm_ok = script, warm_ok
         self.visited, self.searched, self.closed = [], [], False
+        self.suspended = 0
+        # A profile on disk, so copying it can be checked: the cookie database
+        # names the session the profile was first made for, and a cache file
+        # stands for everything a copy should leave behind.
+        given = options.get("profile_dir")
+        self.profile_dir = given or tempfile.mkdtemp(prefix="fake-profile-")
+        if not given:
+            for rel, text in (
+                (COOKIES, str(id(self))),
+                (COOKIES + "-journal", ""),
+                ("Local State", "{}"),
+                (CACHE, "x" * 1000),
+            ):
+                path = os.path.join(self.profile_dir, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as fh:
+                    fh.write(text)
         FakeSession.opened.append(self)
 
     def _spend(self, n):
@@ -54,6 +82,20 @@ class FakeSession:
 
     def close(self):
         self.closed = True
+
+    def suspend(self):
+        self.suspended += 1
+        return self.profile_dir
+
+    def resume(self):
+        pass
+
+    def marker(self):
+        with open(os.path.join(self.profile_dir, COOKIES)) as fh:
+            return fh.read()
+
+    def has(self, rel):
+        return os.path.exists(os.path.join(self.profile_dir, rel))
 
     def visit(self, url, dwell):
         self.visited.append(url)
@@ -78,10 +120,11 @@ class FakeSession:
         return item
 
 
-def scraper(scripts, settings=None, warm_ok=True, events=None, relay=True, cls=None):
+def scraper(scripts, settings=None, warm_ok=True, events=None, relay=True, cls=None, sleep=None):
     """One script per identity, consumed in mint order."""
     FakeSession.opened = []
     FakeRelay.by_address = {}
+    FakeRelay.refusal = None
     scripts = list(scripts)
 
     def factory(proxy, **options):
@@ -93,7 +136,7 @@ def scraper(scripts, settings=None, warm_ok=True, events=None, relay=True, cls=N
         session_factory=factory,
         relay_factory=FakeRelay if relay else None,
         resolver_factory=None,
-        sleep=lambda seconds: None,
+        sleep=sleep or (lambda seconds: None),
         on_event=(events.append if events is not None else None),
     )
 
@@ -475,3 +518,147 @@ def test_a_spare_that_fails_to_launch_is_replaced_not_fatal():
     assert [e["error"] for e in events if e["event"] == "spare_failed"] == [
         "RuntimeError: browser did not start"
     ]
+
+
+@pytest.mark.parametrize("status", ["402 traffic exhausted", "407 Proxy Authentication Required"])
+def test_an_account_wide_proxy_refusal_stops_at_the_first_exit(status):
+    s = scraper([[SERVED]] * 6, warm_ok=False)
+    FakeRelay.refusal = f"HTTP/1.1 {status}"
+    with pytest.raises(ProxyRefused, match=status.split()[0]):
+        list(s.run(["a", "b"]))
+    assert len(FakeSession.opened) == 1
+    assert FakeSession.opened[0].closed and FakeSession.opened[0].relay.stopped
+    assert len(FakeSession.opened[0].visited) == 1  # the warm-up stops at the first refusal
+
+
+def test_a_proxy_refusal_mid_run_stops_it_with_the_reason():
+    events = []
+    tunnel = RuntimeError("Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://www.google.com/")
+    s = scraper([[SERVED, tunnel]], events=events)
+    records = []
+    with pytest.raises(ProxyRefused, match="402"):
+        for r in s.run(["a", "b"]):
+            records.append(r)
+            FakeSession.opened[0].relay.refusal = "HTTP/1.1 402 traffic exhausted"
+    assert [r["search_metadata"]["status"] for r in records] == ["Success"]
+    assert FakeSession.opened[0].closed
+    assert any(e.get("reason", "").startswith("proxy: HTTP/1.1 402") for e in events)
+
+
+def test_an_exit_specific_proxy_refusal_does_not_stop_the_run():
+    s = scraper(
+        [[SERVED], [SERVED]],
+        warm_ok=False,
+        settings=Settings(breaker=2, gap_seconds=(0, 0), dwell_seconds=(0, 0)),
+    )
+    FakeRelay.refusal = "HTTP/1.1 502 Bad Gateway"
+    with pytest.raises(ExitsRefused) as caught:
+        list(s.run(["a"]))
+    assert not isinstance(caught.value, ProxyRefused)
+    assert len(FakeSession.opened) == 2
+
+
+def clone_settings(**overrides):
+    values = dict(
+        clones=3,
+        max_queries_per_exit=2,
+        gap_seconds=(0, 0),
+        dwell_seconds=(0, 0),
+        settle_seconds=(45, 45),
+    )
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_new_exits_start_from_a_copy_of_the_served_profile():
+    events, slept = [], []
+    s = scraper([[SERVED, SERVED], [SERVED]], clone_settings(), events=events, sleep=slept.append)
+    records = list(s.run(["a", "b", "c"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success"] * 3
+    seed, copy = FakeSession.opened
+    assert seed.suspended == 1  # closed once for the copy, then reopened
+    assert copy.options["profile_dir"] != seed.profile_dir
+    assert copy.marker() == seed.marker()
+    assert copy.has("Local State") and copy.has(COOKIES + "-journal")
+    assert not copy.has(CACHE)  # the jar travels, the rest of the profile does not
+    assert copy.visited == []  # no warm-up of its own
+    assert copy.searched == ["c"]
+    assert slept.count(45) == 2  # after reopening the seed, and before the copy's first query
+    assert s.stats.clones == 1
+    assert [e["event"] for e in events].count("template") == 1
+
+
+def test_a_copy_refused_on_its_first_query_ends_the_copying():
+    events = []
+    s = scraper([[SERVED, SERVED], [REFUSED], [SERVED]], clone_settings(), events=events)
+    records = list(s.run(["a", "b", "c"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success"] * 3
+    seed, copy, fresh = FakeSession.opened
+    assert copy.searched == ["c"] and copy.visited == []
+    assert len(fresh.visited) == 6  # warmed from scratch again
+    dropped = [e for e in events if e["event"] == "template_dropped"]
+    assert dropped[0]["reason"] == "a copy was refused on its first query"
+    assert not os.path.exists(copy.profile_dir) or copy.closed
+
+
+def test_a_template_past_its_age_is_not_used(monkeypatch):
+    import google_browser_scraper.scraper as module
+
+    clock = iter(range(0, 10**6, 100))  # every reading is 100 s after the last
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock))
+    s = scraper([[SERVED, SERVED], [SERVED]], clone_settings(clone_max_age=150))
+    list(s.run(["a", "b", "c"]))
+    seed, fresh = FakeSession.opened
+    assert len(fresh.visited) == 6
+
+
+def test_copies_stop_when_the_template_is_used_up():
+    s = scraper(
+        [[SERVED, SERVED], [SERVED, SERVED], [SERVED]],
+        clone_settings(clones=1),
+    )
+    list(s.run(["a", "b", "c", "d", "e"]))
+    seed, copy, fresh = FakeSession.opened
+    assert copy.visited == [] and len(fresh.visited) == 6
+    assert s.stats.clones == 1
+
+
+def test_no_profile_is_copied_when_copying_is_off_or_nothing_is_left_to_ask():
+    list(scraper([[SERVED, SERVED]]).run(["a", "b"]))
+    assert FakeSession.opened[0].suspended == 0
+    list(scraper([[SERVED]], clone_settings()).run(["a"]))
+    assert FakeSession.opened[0].suspended == 0
+
+
+def test_the_template_is_removed_when_the_run_ends():
+    events = []
+    s = scraper([[SERVED, SERVED, SERVED]], clone_settings(max_queries_per_exit=5), events=events)
+    list(s.run(["a", "b"]))
+    dropped = [e for e in events if e["event"] == "template_dropped"]
+    assert dropped and dropped[-1]["reason"] == "run finished"
+
+
+def test_an_exit_capped_on_its_first_query_still_leaves_a_template():
+    slept = []
+    s = scraper([[SERVED], [SERVED]], clone_settings(max_queries_per_exit=1), sleep=slept.append)
+    list(s.run(["a", "b"]))
+    seed, copy = FakeSession.opened
+    assert seed.suspended == 1 and seed.closed
+    assert copy.visited == [] and copy.searched == ["b"]
+    assert slept.count(45) == 1  # only before the copy's first query
+
+
+def test_a_profile_with_no_cookie_database_leaves_no_template():
+    class NoJar(FakeSession):
+        def suspend(self):
+            os.remove(os.path.join(self.profile_dir, COOKIES))
+            return super().suspend()
+
+    events = []
+    s = scraper([[SERVED], [SERVED], [SERVED]], clone_settings(), events=events, cls=NoJar)
+    records = list(s.run(["a", "b", "c"]))
+    assert [r["search_metadata"]["status"] for r in records] == ["Success"] * 3
+    failed = [e for e in events if e["event"] == "template_failed"]
+    assert len(failed) == 2 and "no cookie database" in failed[0]["error"]
+    assert s.stats.clones == 0
+    assert all(len(f.visited) == 6 for f in FakeSession.opened)  # each warmed itself

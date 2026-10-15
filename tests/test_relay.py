@@ -113,6 +113,32 @@ def test_gateway_refusal_is_passed_through_unchanged(upstream, echo):
         relay.stop()
     assert head.startswith("HTTP/1.1 407")
     assert relay.failures == 1 and relay.tunnels == 0
+    assert relay.refusal == "HTTP/1.1 407 Proxy Authentication Required"
+
+
+def test_a_refusal_with_bare_line_feeds_is_recognised(echo):
+    # A real gateway's answer to a wrong password, byte for byte: LF line
+    # endings, then the connection closes.
+    def handle(conn):
+        with conn:
+            _read_head(conn)
+            conn.sendall(
+                b"HTTP/1.1 407 Proxy Authentication Required\n"
+                b'Proxy-Authenticate: Basic realm="Invalid credentials"\n'
+                b"Connection: close\n\n"
+            )
+
+    server, port = _serve(handle)
+    relay = Relay({"server": f"http://127.0.0.1:{port}", "username": "u", "password": "x"})
+    address = relay.start()
+    try:
+        head, _ = _tunnel(address, f"127.0.0.1:{echo}")
+    finally:
+        relay.stop()
+        server.close()
+    assert head.startswith("HTTP/1.1 407")
+    assert relay.failures == 1 and relay.tunnels == 0
+    assert relay.refusal == "HTTP/1.1 407 Proxy Authentication Required"
 
 
 def test_optimization_guide_is_refused_locally(upstream):

@@ -108,3 +108,28 @@ def test_doctor_assessment():
 
     headless = dict(windows, user_agent="Mozilla/5.0 HeadlessChrome/151.0.0.0")
     assert {c.name: c.status for c in assess(headless)}["user agent"] == FAIL
+
+
+def test_a_query_file_saved_with_a_byte_order_mark(tmp_path, monkeypatch):
+    # Windows tools (PowerShell 5 `Out-File -Encoding utf8`, older Notepad)
+    # write a BOM; it must not end up in the first query.
+    asked = []
+
+    class Recorder:
+        stats = type("Stats", (), {"summary": lambda self, price: {}})()
+
+        def run(self, queries):
+            asked.extend(queries)
+            return iter(())
+
+    monkeypatch.setattr(cli, "_build", lambda args, **kw: (Recorder(), ""))
+    path = tmp_path / "q.txt"
+    path.write_bytes("\ufeffbest pizza\nkimchi\n".encode("utf-8"))
+    assert cli.main(["search", "-f", str(path), "--no-proxy"]) == 0
+    assert asked == ["best pizza", "kimchi"]
+
+
+def test_copies_are_on_by_default_and_can_be_turned_off():
+    parser = cli._parser()
+    assert parser.parse_args(["search", "q", "--no-proxy"]).clone == 10
+    assert parser.parse_args(["search", "q", "--no-proxy", "--clone", "0"]).clone == 0

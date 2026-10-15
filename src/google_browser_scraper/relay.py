@@ -60,6 +60,10 @@ class Relay:
         self.tunnels = 0
         self.failures = 0
         self.blocked = 0
+        #: Status line of the last CONNECT the upstream proxy refused, such as
+        #: `HTTP/1.1 402 traffic exhausted`. The browser only reports a failed
+        #: tunnel; this is the proxy's reason.
+        self.refusal: str | None = None
         self._server: socket.socket | None = None
         self._threads: list[threading.Thread] = []
         self._closing = threading.Event()
@@ -113,7 +117,7 @@ class Relay:
             head = _read_head(client)
             if not head:
                 return
-            line = head.split("\r\n", 1)[0]
+            line = _first_line(head)
             method, _, rest = line.partition(" ")
             if method.upper() == "CONNECT":
                 self._tunnel(client, rest.split(" ", 1)[0])
@@ -165,6 +169,7 @@ class Relay:
                     # Pass the gateway's own answer through: its status is the
                     # evidence (a bad parameter is 406 or 407 on some gateways).
                     self._fail()
+                    self.refusal = _first_line(reply)[:200] or None
                     if reply:
                         client.sendall(reply.encode("latin-1"))
                     _close(upstream)
@@ -242,8 +247,15 @@ class Relay:
 
 
 def _read_head(sock: socket.socket) -> str:
+    """Read a message head, up to the blank line that ends it.
+
+    A bare LF ends a line too (RFC 9112 section 2.2 allows it), and the
+    NodeMaven gateway frames its refusals that way. Every spelling of the
+    blank line ends in `\\n\\n` or `\\n\\r\\n`. A head cut short by the
+    peer closing is returned empty, never parsed.
+    """
     buffer = b""
-    while b"\r\n\r\n" not in buffer:
+    while b"\n\n" not in buffer and b"\n\r\n" not in buffer:
         try:
             chunk = sock.recv(CHUNK)
         except OSError:
@@ -256,8 +268,12 @@ def _read_head(sock: socket.socket) -> str:
     return buffer.decode("latin-1")
 
 
+def _first_line(head: str) -> str:
+    return head.split("\n", 1)[0].rstrip("\r")
+
+
 def _status(reply: str) -> int:
-    parts = reply.split("\r\n", 1)[0].split(" ")
+    parts = _first_line(reply).split(" ")
     return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
 
 

@@ -13,6 +13,7 @@ from . import __version__, engines, warmup
 from .classify import classify
 from .output import WRITERS, open_writer, use_utf8
 from .parse import parse_serp
+from .pool import Pool
 from .proxy import NodeMavenSource, ProxyTemplate
 from .scraper import ExitsRefused, Scraper, Settings
 
@@ -45,6 +46,13 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("-f", "--file", type=Path, help="one query per line")
     _scraper_options(search)
     search.add_argument("--pages", type=int, default=1, help="result pages per query (default 1)")
+    search.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="exits to search on at once, one browser each (default 1)",
+    )
     search.add_argument("--format", choices=list(WRITERS), default="jsonl")
     search.add_argument("-o", "--output", type=Path, help="output file (default stdout)")
     search.add_argument(
@@ -120,6 +128,21 @@ def _scraper_options(p: argparse.ArgumentParser) -> None:
         "retired exit is replaced without waiting (default 0; each costs a warm-up)",
     )
     p.add_argument(
+        "--clone",
+        type=int,
+        default=10,
+        metavar="N",
+        help="start up to N new exits from copies of the first served exit's cookies "
+        "instead of warming each one (default 10; 0 turns it off)",
+    )
+    p.add_argument(
+        "--clone-max-age",
+        type=float,
+        default=60.0,
+        metavar="MIN",
+        help="minutes copied cookies stay in use (default 60)",
+    )
+    p.add_argument(
         "--gap",
         type=_pair,
         default=(8.0, 20.0),
@@ -159,7 +182,7 @@ def _scraper_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("-v", "--verbose", action="store_true", help="log identities to stderr")
 
 
-def _build(args, *, pages: int = 1) -> tuple[Scraper, str]:
+def _build(args, *, pages: int = 1, worker: int | None = None) -> tuple[Scraper, str]:
     if args.nodemaven:
         proxy = NodeMavenSource(country=args.country)
     elif args.no_proxy:
@@ -189,18 +212,28 @@ def _build(args, *, pages: int = 1) -> tuple[Scraper, str]:
         pages=pages,
         max_queries_per_exit=args.max_per_exit,
         spare=args.spare,
+        clones=args.clone,
+        clone_max_age=args.clone_max_age * 60,
         gap_seconds=args.gap,
         headless=args.headless,
         channel=args.channel,
         timezone_id=args.timezone,
         browser_args=browser_args,
         use_relay=not args.no_relay,
-        save_html=str(args.save_html) if args.save_html else None,
+        save_html=_html_dir(args.save_html, worker),
         resolve_links=not args.no_resolve_links,
     )
-    log = (lambda e: print(json.dumps(e), file=sys.stderr)) if args.verbose else None
-    described = proxy.describe() if proxy else "none (this machine's own address)"
+    log = None
     if args.verbose:
+        tag = {} if worker is None else {"worker": worker}
+
+        def _log(event: dict) -> None:
+            print(json.dumps({**tag, **event}), file=sys.stderr, flush=True)
+
+        log = _log
+
+    described = proxy.describe() if proxy else "none (this machine's own address)"
+    if args.verbose and not worker:
         print(f"proxy: {described}; engine: {args.engine}", file=sys.stderr)
     return Scraper(proxy, settings, on_event=log), described
 
@@ -208,10 +241,13 @@ def _build(args, *, pages: int = 1) -> tuple[Scraper, str]:
 def _search(args) -> int:
     queries = list(args.queries)
     if args.file:
-        queries += args.file.read_text(encoding="utf-8").splitlines()
+        queries += args.file.read_text(encoding="utf-8-sig").splitlines()
     if not any(q.strip() for q in queries):
         raise ValueError("no queries given")
-    scraper, _ = _build(args, pages=args.pages)
+    if args.workers != 1:
+        scraper = Pool(lambda i: _build(args, pages=args.pages, worker=i)[0], args.workers)
+    else:
+        scraper, _ = _build(args, pages=args.pages)
     stream = args.output.open("w", encoding="utf-8", newline="") if args.output else sys.stdout
     writer = open_writer(args.format, stream)
     failed, code = 0, 0
@@ -224,6 +260,9 @@ def _search(args) -> int:
         code = 3
     finally:
         writer.close()
+        not_run = getattr(scraper, "not_run", [])
+        if not_run:
+            print(f"not run: {len(not_run)} queries", file=sys.stderr)
         if args.output:
             stream.close()
         print("summary: " + json.dumps(scraper.stats.summary(args.price_per_gb)), file=sys.stderr)
@@ -276,6 +315,13 @@ def _doctor(args) -> int:
     for c in checks:
         print(f"[{c.status:4}] {c.name:<{width}}  {c.detail}")
     return 1 if any(c.status == FAIL for c in checks) else 0
+
+
+def _html_dir(folder: Path | None, worker: int | None) -> str | None:
+    """Each worker numbers its pages from 1, so each gets a folder of its own."""
+    if folder is None:
+        return None
+    return str(folder if worker is None else folder / f"w{worker}")
 
 
 def _pair(text: str) -> tuple[float, float]:

@@ -66,6 +66,7 @@ class BrowserSession:
         timezone_id: str | None = None,
         browser_args: list[str] | tuple[str, ...] = (),
         rng: random.Random | None = None,
+        profile_dir: str | None = None,
     ) -> None:
         if any(a.startswith(("--disable-features", "--enable-features")) for a in browser_args):
             raise ValueError(
@@ -80,19 +81,38 @@ class BrowserSession:
         self._rng = rng or random.Random()
         self._pw = None
         self._context = None
-        self._profile = None
+        # A given directory (a copy of another identity's profile) is used as
+        # it is; either way the profile is removed on close.
+        self._profile = profile_dir
         self.page = None
 
+    @property
+    def profile_dir(self) -> str | None:
+        return self._profile
+
     def __enter__(self) -> BrowserSession:
-        self._profile = tempfile.mkdtemp(prefix="gbs-profile-")
+        if self._profile is None:
+            self._profile = tempfile.mkdtemp(prefix="gbs-profile-")
         try:
-            self._context = self._launch(self._profile)
+            self._open()
         except Exception:
             self.close()
             raise
+        return self
+
+    def _open(self) -> None:
+        self._context = self._launch(self._profile)
         pages = self._context.pages
         self.page = pages[0] if pages else self._context.new_page()
-        return self
+
+    def suspend(self) -> str:
+        """Close the browser and keep its profile on disk, so it can be
+        copied; `resume()` opens it again on the same proxy."""
+        self._shut()
+        return self._profile
+
+    def resume(self) -> None:
+        self._open()
 
     def _launch(self, profile: str):
         from patchright.sync_api import sync_playwright
@@ -112,6 +132,12 @@ class BrowserSession:
         self.close()
 
     def close(self) -> None:
+        self._shut()
+        if self._profile:
+            shutil.rmtree(self._profile, ignore_errors=True)
+        self._profile = None
+
+    def _shut(self) -> None:
         for step in (
             lambda: self._context and self._context.close(),
             lambda: self._pw and self._pw.stop(),
@@ -120,9 +146,7 @@ class BrowserSession:
                 step()
             except Exception:
                 pass
-        if self._profile:
-            shutil.rmtree(self._profile, ignore_errors=True)
-        self._context = self._pw = self._profile = self.page = None
+        self._context = self._pw = self.page = None
 
     # -- warming -------------------------------------------------------------
 

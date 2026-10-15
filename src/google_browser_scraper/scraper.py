@@ -11,13 +11,23 @@ Traffic is counted by a loopback relay per identity (see `relay`);
 With `spare` set, the next identities are warmed in the background while the
 current one serves, so a retired exit is replaced without waiting for a
 warm-up.
+
+With `clones` set, the browser profile of the first exit Google serves is
+copied, and the next exits start from those copies on new sticky sessions
+instead of warming from scratch. Google's acceptance follows the profile more
+than the address: a copy is served about as often as the profile it was taken
+from, and refused when that one would be, so a copy that is refused on its
+first query ends the copying.
 """
 
 from __future__ import annotations
 
 import gzip
+import os
 import random
 import re
+import shutil
+import tempfile
 import threading
 import time
 from collections import deque
@@ -38,6 +48,7 @@ from .relay import Relay
 
 MB = 1024 * 1024
 MAX_SPARES = 3
+MAX_CLONES = 50
 
 
 _CREDENTIALS = re.compile(r"//[^/\s:@]+:[^@\s]+@")
@@ -56,10 +67,85 @@ def describe_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {first}" if first else type(exc).__name__
 
 
+#: Chromium's single-instance locks, which must not travel with a copy.
+_PROFILE_LOCKS = shutil.ignore_patterns("Singleton*", "lockfile", "*.lock")
+
+#: Where Chromium keeps the cookie database, newest layout first.
+_COOKIE_DIRS = (os.path.join("Default", "Network"), "Default")
+
+
+def _retry_copy(copy, dest: str, attempts: int) -> None:
+    """Run `copy` into a fresh `dest`, retrying on OSError.
+
+    Windows can hold a file of a just-closed browser for a moment, so a failed
+    copy is retried after a short wait.
+    """
+    for attempt in range(attempts):
+        shutil.rmtree(dest, ignore_errors=True)
+        try:
+            copy()
+            return
+        except OSError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(1.0)
+
+
+def _copy_profile(source: str, dest: str, attempts: int = 5) -> None:
+    """Copy a closed browser profile into `dest` (created or replaced)."""
+    _retry_copy(lambda: shutil.copytree(source, dest, ignore=_PROFILE_LOCKS), dest, attempts)
+
+
+def _copy_jar(source: str, dest: str, attempts: int = 5) -> None:
+    """Copy the cookie jar of a closed profile into a new profile at `dest`.
+
+    The new profile holds the cookie database and `Local State`, which carries
+    the key that decrypts it, and nothing else: storage, cache and history stay
+    behind. That is a few tens of kilobytes instead of tens of megabytes.
+    """
+    for rel in _COOKIE_DIRS:
+        folder = os.path.join(source, rel)
+        if os.path.isfile(os.path.join(folder, "Cookies")):
+            break
+    else:
+        raise RuntimeError("no cookie database in the profile")
+    names = [n for n in os.listdir(folder) if n.startswith("Cookies")]
+
+    def copy() -> None:
+        os.makedirs(os.path.join(dest, rel))
+        for name in names:
+            shutil.copy2(os.path.join(folder, name), os.path.join(dest, rel, name))
+        state = os.path.join(source, "Local State")
+        if os.path.isfile(state):
+            shutil.copy2(state, os.path.join(dest, "Local State"))
+
+    _retry_copy(copy, dest, attempts)
+
+
 class ExitsRefused(RuntimeError):
     """Too many consecutive exits were refused or unreachable. Raised instead
     of carrying on, because on a shared, metered pool every further identity
     costs traffic and reputation and the evidence says it will fail too."""
+
+
+class ProxyRefused(ExitsRefused):
+    """The proxy itself refused: no traffic left (402) or wrong credentials
+    (407). No other exit through the same account can do better."""
+
+
+#: Proxy answers that hold for every exit of the account, not just this one.
+_ACCOUNT_REFUSALS = (402, 407)
+
+
+def _account_refusal(relay: Any) -> str | None:
+    """The proxy's status line if it refused for the whole account, else None."""
+    refusal = getattr(relay, "refusal", None)
+    if not refusal:
+        return None
+    parts = refusal.split(" ", 2)
+    if len(parts) > 1 and parts[1].isdigit() and int(parts[1]) in _ACCOUNT_REFUSALS:
+        return refusal
+    return None
 
 
 @dataclass
@@ -90,6 +176,14 @@ class Settings:
     #: so the next exit is ready when this one is retired. Each costs a
     #: warm-up's traffic whether it is used or not.
     spare: int = 0
+    #: New exits started from copies of the first served exit's profile,
+    #: instead of each warming its own. 0 turns copying off.
+    clones: int = 0
+    #: Seconds after which the copied profile is not used any more.
+    clone_max_age: float = 3600.0
+    #: Wait between relaunching a warmed profile and its first search: a
+    #: search the moment the browser starts is refused far more often.
+    settle_seconds: tuple[float, float] = (40.0, 60.0)
 
     def __post_init__(self) -> None:
         engines.get(self.engine)
@@ -99,10 +193,23 @@ class Settings:
                 raise ValueError(f"{name} must be at least 1")
         if not 0 <= self.spare <= MAX_SPARES:
             raise ValueError(f"spare must be between 0 and {MAX_SPARES}")
-        for name in ("gap_seconds", "dwell_seconds"):
+        if not 0 <= self.clones <= MAX_CLONES:
+            raise ValueError(f"clones must be between 0 and {MAX_CLONES}")
+        if self.clone_max_age <= 0:
+            raise ValueError("clone_max_age must be positive")
+        for name in ("gap_seconds", "dwell_seconds", "settle_seconds"):
             low, high = getattr(self, name)
             if not 0 <= low <= high:
                 raise ValueError(f"{name} must be a (low, high) pair with 0 <= low <= high")
+
+
+@dataclass
+class Template:
+    """A served identity's browser profile, kept on disk to start copies from."""
+
+    path: str
+    made_at: float
+    left: int
 
 
 @dataclass
@@ -117,6 +224,8 @@ class Identity:
     consent_dismissed: bool = False
     warm_seconds: float = 0.0
     ready_at: float = 0.0
+    #: Started from a copy of another identity's profile, not warmed itself.
+    clone: bool = False
 
     def bytes(self) -> int | None:
         return self.relay.total if self.relay is not None else None
@@ -138,6 +247,7 @@ class Stats:
     """What a run cost, counted across every identity including refused ones."""
 
     identities: int = 0
+    clones: int = 0
     pages_served: int = 0
     queries_failed: int = 0
     exits_refused: int = 0
@@ -153,6 +263,7 @@ class Stats:
         total = self.bytes_total + sum(i.bytes() or 0 for i in self._open)
         out: dict[str, Any] = {
             "identities": self.identities,
+            "clones": self.clones,
             "pages_served": self.pages_served,
             "queries_failed": self.queries_failed,
             "exits_refused": self.exits_refused,
@@ -203,6 +314,12 @@ class Pinned:
     def next_page(self) -> Any:
         return self._call(self.session.next_page)
 
+    def suspend(self) -> str:
+        return self._call(self.session.suspend)
+
+    def resume(self) -> None:
+        self._call(self.session.resume)
+
     def close(self) -> None:
         try:
             self._call(self.session.close)
@@ -242,6 +359,7 @@ class Scraper:
         self._spares: deque[Future] = deque()
         self._warmer: ThreadPoolExecutor | None = None
         self._cancel = threading.Event()
+        self._template: Template | None = None
         self._failed_exits = 0
         self._saved = 0
         self.stats = Stats()
@@ -277,6 +395,7 @@ class Scraper:
         if self._identity is not None:
             self._retire("run finished")
         self._discard_spares()
+        self._drop_template("run finished")
         if self._resolver is not None:
             self._resolver.close()
             self.stats.bytes_total += self._resolver.bytes
@@ -302,6 +421,7 @@ class Scraper:
                 fetched = self._search(identity, query)
             except Exception as exc:
                 last_error = describe_error(exc)
+                self._check_proxy(identity)
                 self._retire(f"error: {describe_error(exc)}")
                 self._count_failure()
                 continue
@@ -316,9 +436,15 @@ class Scraper:
                     self._top_up()
                 yield self._served(query, 1, fetched, verdict, identity, started, before, saved)
                 yield from self._more_pages(query, identity)
-                if self._identity is identity and identity.queries >= s.max_queries_per_exit:
+                capped = identity.queries >= s.max_queries_per_exit
+                if self._identity is identity and more and self._wants_template(identity):
+                    self._take_template(identity, reopen=not capped)
+                if self._identity is identity and capped:
                     self._retire("query cap reached")
                 return
+            if identity.clone and identity.queries == 1:
+                # Copies are refused together with the profile they came from.
+                self._drop_template("a copy was refused on its first query")
             last_verdict, last_error = verdict, None
             self.stats.exits_refused += verdict.refused
             self._retire(verdict.kind)
@@ -441,8 +567,101 @@ class Scraper:
 
     def _current_identity(self) -> Identity | None:
         if self._identity is None:
-            self._identity = self._take_spare() if self._spares else self._mint()
+            if self._template_usable():
+                self._identity = self._adopt(self._clone(), clone=True)
+            elif self._spares:
+                self._identity = self._take_spare()
+            else:
+                self._identity = self._mint()
         return self._identity
+
+    # -- copies of a served profile ------------------------------------------
+
+    def _wants_template(self, identity: Identity) -> bool:
+        return bool(self.settings.clones) and not identity.clone and self._template is None
+
+    def _take_template(self, identity: Identity, reopen: bool = True) -> None:
+        """Copy a served identity's cookie jar, then carry on with it.
+
+        The browser is closed for the copy: a live profile's cookie database is
+        mid-write. Unless the identity is about to be retired, it is reopened
+        on the same sticky session.
+        """
+        s = self.settings
+        dest = tempfile.mkdtemp(prefix="gbs-template-")
+        try:
+            source = identity.session.suspend()
+            _copy_jar(source, dest)
+            if reopen:
+                identity.session.resume()
+        except Exception as exc:
+            shutil.rmtree(dest, ignore_errors=True)
+            self._event("template_failed", identity, error=describe_error(exc))
+            self._retire(f"error: {describe_error(exc)}")
+            return
+        self._template = Template(dest, time.monotonic(), s.clones)
+        self._event("template", identity, copies=s.clones)
+        if reopen:
+            self._sleep(self._rng.uniform(*s.settle_seconds))
+
+    def _template_usable(self) -> bool:
+        t = self._template
+        if t is None:
+            return False
+        if t.left <= 0:
+            self._drop_template("all copies used")
+            return False
+        if time.monotonic() - t.made_at > self.settings.clone_max_age:
+            self._drop_template("too old")
+            return False
+        return True
+
+    def _drop_template(self, reason: str) -> None:
+        t, self._template = self._template, None
+        if t is not None:
+            shutil.rmtree(t.path, ignore_errors=True)
+            self._emit({"event": "template_dropped", "reason": reason, "unused": t.left})
+
+    def _clone(self) -> Identity:
+        """A new sticky session started from a copy of the template profile."""
+        s = self.settings
+        t = self._template
+        t.left -= 1
+        profile = tempfile.mkdtemp(prefix="gbs-clone-")
+        _copy_profile(t.path, profile)
+        session_id = new_session_id()
+        upstream = self.proxy.for_session(session_id) if self.proxy is not None else None
+        relay, browser_proxy = self._relay_for(upstream)
+        started = time.monotonic()
+        session = self._factory(
+            browser_proxy,
+            headless=s.headless,
+            channel=s.channel,
+            timezone_id=s.timezone_id,
+            browser_args=s.browser_args,
+            rng=self._rng,
+            profile_dir=profile,
+        )
+        try:
+            session.__enter__()
+        except Exception:
+            shutil.rmtree(profile, ignore_errors=True)
+            if relay is not None:
+                relay.stop()
+            raise
+        self._sleep(self._rng.uniform(*s.settle_seconds))
+        self.stats.clones += 1
+        return Identity(
+            session_id,
+            session,
+            relay,
+            0,
+            0,
+            0,
+            warm_seconds=round(time.monotonic() - started, 1),
+            ready_at=time.monotonic(),
+            clone=True,
+        )
 
     def _mint(self) -> Identity | None:
         return self._adopt(self._warm(pinned=False))
@@ -489,6 +708,8 @@ class Scraper:
             if pinned and self._cancel.is_set():
                 break  # the run is closing; stop paying for a spare nobody will use
             delivered += bool(session.visit(url, self._rng.uniform(*s.dwell_seconds)))
+            if _account_refusal(relay):
+                break  # every further page is refused too, each after a full timeout
         warm_bytes = relay.total if relay is not None else None
         return Identity(
             session_id,
@@ -520,6 +741,7 @@ class Scraper:
         if identity.warm_pages and not identity.warm_delivered:
             # Nothing arrived: the proxy is down, the credentials are wrong or
             # the exit is dead. Not Google's verdict, but just as final.
+            self._check_proxy(identity)
             self._identity = identity
             self.stats.exits_unreachable += 1
             self._retire("unreachable")
@@ -549,7 +771,8 @@ class Scraper:
 
     def _top_up(self) -> None:
         """Start warming spares in the background, up to `settings.spare`."""
-        if not self.settings.spare:
+        if not self.settings.spare or self._template is not None:
+            # A copy of the template replaces a retired exit in seconds.
             return
         if self._warmer is None:
             self._warmer = ThreadPoolExecutor(
@@ -608,6 +831,23 @@ class Scraper:
                 self.stats._open.remove(identity)
             self._event(
                 "retired", identity, reason=reason, queries=identity.queries, bytes=identity.bytes()
+            )
+
+    def _check_proxy(self, identity: Identity) -> None:
+        """Stop the run if the proxy refused for the whole account.
+
+        The browser reports any refused tunnel as `ERR_TUNNEL_CONNECTION_FAILED`;
+        the relay kept the proxy's own status line. 402 and 407 will be the
+        answer for every exit, so drawing more exits only adds failures.
+        """
+        refusal = _account_refusal(identity.relay)
+        if refusal:
+            if self._identity is identity:
+                self._retire(f"proxy: {refusal}")
+            else:
+                self._close_identity(identity, f"proxy: {refusal}")
+            raise ProxyRefused(
+                f"the proxy refused: {refusal}. Check the account's traffic and credentials."
             )
 
     def _event(self, kind: str, identity: Identity, **fields) -> None:
