@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/nodemaven/google-browser-scraper/main/assets/banner.png" alt="Google Browser Scraper">
+</p>
+
 # google-browser-scraper
 
 Google Search results from a real browser, through your own sticky proxy.
