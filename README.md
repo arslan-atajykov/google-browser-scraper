@@ -4,7 +4,10 @@
 
 # google-browser-scraper
 
-Google Search results from a real browser, through your own sticky proxy.
+Self-hosted Google search scraper for Python. Scrape Google search results (SERP)
+with a real Chrome browser and your own residential proxy, and get clean JSON
+back. Use it as a CLI, a Python library, a local HTTP API, or an MCP server
+that gives AI agents live Google search.
 
 Plain HTTP is no longer a reliable way to scrape Google: it often expects a
 browser that runs JavaScript, and a fresh browser on a fresh proxy exit can be
@@ -13,11 +16,24 @@ session with ordinary browsing, opens Google's results page for each query in
 that browser, checks whether Google served results or refused, and writes one
 JSON record per results page. Captchas, blocks and failures are reported as such, never as "no results".
 
-**Run it on Windows** - a desktop or a Windows VPS. That is where it is tested
-and where Google serves it. On a Linux server without a GPU, Google refused
-almost every search in testing; Chrome has no WebGL there, which is the main
-suspect, so Linux and Docker are experimental for now. `google-browser-scraper
-doctor` shows what your machine looks like to a website.
+`google-browser-scraper doctor` shows what your machine looks like to a website.
+
+## Features
+
+- Real browser scraping: real Chrome via Patchright, with a warm-up before every new identity
+- Bring your own proxy: any residential proxy with sticky sessions, built-in NodeMaven support
+- Self-hosted SERP API alternative with JSON: `organic_results`, `ads`, `related_questions`, `related_searches`, `pagination`
+- Honest failures: captchas and blocks come back labeled, not as empty results
+- Cost tracking: bytes per page and cost per 1000 pages in every run summary
+- Four ways to run it: CLI, Python library, HTTP API, MCP server for AI agents
+- Docker image for self-hosted deployment
+
+## Use cases
+
+- SEO rank tracking and SERP monitoring for your own keywords
+- Keyword and competitor research from live Google results
+- Web search for AI agents and LLM apps through MCP
+- A self-hosted alternative to paid Google search APIs when you already pay for proxies
 
 ## Install
 
@@ -213,11 +229,8 @@ Google refuses, and tells you what each page cost.
 
 ## Status
 
-Early. Windows is the tested and recommended platform. **Linux and Docker are
-experimental**: on a machine without a GPU, Chrome has no WebGL, which a normal
-desktop always has; the Docker image turns on a software renderer for it, and
-whether Google serves that is not measured yet. The `cloak` engine
-(`--engine cloak`) is experimental too; `patchright` is the default.
+Early. The `cloak` engine (`--engine cloak`) is experimental; `patchright` is
+the default.
 
 Google changes its pages often. If results come back empty or wrong, run with
 `--save-html DIR` and open an issue with what you see.
