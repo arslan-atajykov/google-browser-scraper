@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 
 PLACEHOLDER = "{session}"
 _SCHEMES = ("http", "https", "socks5")
+_MB = 1024 * 1024
 
 
 class ProxySource(Protocol):
@@ -118,3 +119,76 @@ class NodeMavenSource:
     def describe(self) -> str:
         shown = ", ".join(f"{k}={v}" for k, v in sorted(self._params.items())) or "any country"
         return f"NodeMaven gateway ({shown}, sticky)"
+
+
+class NodeMavenDemoSource:
+    """A traffic-capped sub-user made from NODEMAVEN_API_KEY for one run; `close()` deletes it."""
+
+    sticky = True
+
+    def __init__(
+        self,
+        *,
+        traffic_limit_mb: float = 200,
+        country: str | None = None,
+        api_key: str | None = None,
+        **params: str,
+    ) -> None:
+        try:
+            from nodemaven import Proxy
+            from nodemaven.api import Client
+        except ImportError as exc:  # pragma: no cover - depends on the extra
+            raise RuntimeError(
+                "the NodeMaven demo source needs the SDK: "
+                "pip install 'google-browser-scraper[nodemaven]'"
+            ) from exc
+        if not hasattr(Client, "create_sub_user"):
+            raise RuntimeError(
+                "the installed nodemaven SDK is too old for sub-user provisioning: "
+                "pip install --upgrade 'google-browser-scraper[nodemaven]'"
+            )
+        key = api_key or os.environ.get("NODEMAVEN_API_KEY")
+        if not key:
+            raise RuntimeError(
+                "set NODEMAVEN_API_KEY in the environment (the dashboard API key, "
+                "not the proxy login or password)"
+            )
+        if country:
+            params["country"] = country
+        client = Client(api_key=key)
+        username = f"gbs{secrets.token_hex(6)}"
+        password = secrets.token_hex(16)
+        created = client.create_sub_user(
+            username,
+            password,
+            traffic_limit=int(traffic_limit_mb * _MB),
+            is_traffic_limited=True,
+        )
+        self._client = client
+        self._sub_user_id = created["id"]
+        self._params = params
+        try:
+            self._proxy = Proxy(
+                login=created.get("proxy_username", username),
+                password=created.get("proxy_password", password),
+                **params,
+            )
+        except Exception:
+            client.delete_sub_user(self._sub_user_id)
+            raise
+        self._closed = False
+
+    def for_session(self, session_id: str) -> dict[str, str]:
+        return self._proxy.session(session_id).playwright()
+
+    def describe(self) -> str:
+        shown = ", ".join(f"{k}={v}" for k, v in sorted(self._params.items())) or "any country"
+        return f"NodeMaven demo sub-user ({shown}, sticky, capped)"
+
+    def close(self, *, keep: bool = False) -> None:
+        """Delete the provisioned sub-user, unless `keep` is set. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        if not keep:
+            self._client.delete_sub_user(self._sub_user_id)
