@@ -1,5 +1,6 @@
 """The identity lifecycle, with a fake browser and no clock."""
 
+import json
 import os
 import tempfile
 
@@ -302,6 +303,28 @@ def test_events_name_sessions_and_never_carry_credentials():
 def test_settings_refuse_nonsense(bad):
     with pytest.raises(ValueError):
         Settings(**bad)
+
+
+def test_refusal_log_appends_one_json_line_per_genuine_refusal(tmp_path):
+    log_path = tmp_path / "refusals.jsonl"
+    settings = Settings(refusal_log=str(log_path), gap_seconds=(0, 0), dwell_seconds=(0, 0))
+    list(scraper([[REFUSED], [SERVED]], settings).run(["a"]))
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert entry["reason"] == "sorry"
+    assert entry["queries_on_exit"] == 1
+    assert entry["clone"] is False
+    assert "ts" in entry and "session" in entry
+
+
+def test_refusal_log_skips_retirements_that_are_not_refusals(tmp_path):
+    log_path = tmp_path / "refusals.jsonl"
+    settings = Settings(
+        refusal_log=str(log_path), max_queries_per_exit=1, gap_seconds=(0, 0), dwell_seconds=(0, 0)
+    )
+    list(scraper([[SERVED], [SERVED]], settings).run(["a", "b"]))
+    assert not log_path.exists()
 
 
 def test_traffic_is_counted_per_page_and_per_run():

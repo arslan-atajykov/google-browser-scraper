@@ -231,6 +231,7 @@ The defaults come from measurements in
 | `--price-per-gb` | | Your proxy price, to print the cost per 1000 pages |
 | `--no-resolve-links` | | Keep result links as Google `/goto` redirects |
 | `--save-html DIR` | | Keep every page's HTML, gzipped |
+| `--refusal-log PATH` | | Append one JSON line per exit Google refuses |
 
 `google-browser-scraper search --help` lists the rest.
 
