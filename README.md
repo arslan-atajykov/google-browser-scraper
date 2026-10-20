@@ -4,6 +4,11 @@
 
 # google-browser-scraper
 
+[![pypi](https://img.shields.io/pypi/v/google-browser-scraper?style=flat-square)](https://pypi.org/project/google-browser-scraper/)
+[![python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](https://pypi.org/project/google-browser-scraper/)
+[![tests](https://img.shields.io/github/actions/workflow/status/nodemaven/google-browser-scraper/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/nodemaven/google-browser-scraper/actions/workflows/ci.yml)
+[![license](https://img.shields.io/pypi/l/google-browser-scraper?style=flat-square)](https://opensource.org/licenses/MIT)
+
 Self-hosted Google search scraper for Python. Scrape Google search results (SERP)
 with a real Chrome browser and your own residential proxy, and get clean JSON
 back. Use it as a CLI, a Python library, a local HTTP API, or an MCP server
