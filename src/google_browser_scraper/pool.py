@@ -80,7 +80,10 @@ class Pool:
                 todo.put(q.strip())
         out: queue.Queue[Any] = queue.Queue()
         stopped: list[ExitsRefused] = []
-        self._scrapers = [self._make(i) for i in range(self.workers)]
+        # Appended one by one so a failed _make still leaves the earlier ones to clean up.
+        self._scrapers = []
+        for i in range(self.workers):
+            self._scrapers.append(self._make(i))
         first = self._scrapers[0].settings
         for scraper in self._scrapers[1:]:
             s = scraper.settings

@@ -80,6 +80,16 @@ export NODEMAVEN_LOGIN=... NODEMAVEN_PASSWORD=...
 google-browser-scraper search -f queries.txt --nodemaven --country us -o results.jsonl
 ```
 
+To cap a run's traffic, `--nodemaven-demo` creates a sub-user with a traffic limit
+from your dashboard API key and deletes it when the run ends. The account needs
+sub-users enabled. A fresh warm-up alone uses about 60 MB, so keep the cap well
+above that:
+
+```bash
+export NODEMAVEN_API_KEY=...
+google-browser-scraper search -f queries.txt --nodemaven-demo --traffic-limit-mb 200 -o results.jsonl
+```
+
 To try it without a proxy, use your own connection:
 
 ```bash
