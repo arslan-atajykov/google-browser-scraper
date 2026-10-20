@@ -1,37 +1,45 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/nodemaven/google-browser-scraper/main/assets/banner.png" alt="Google Browser Scraper">
-</p>
+<div align="center">
 
-# google-browser-scraper
+<img src="https://raw.githubusercontent.com/nodemaven/google-browser-scraper/main/assets/banner.png" alt="Google Browser Scraper">
+
+<h1>google-browser-scraper</h1>
+
+<p><b>Self-hosted Google search scraper with a real Chrome browser and your own residential proxy.</b></p>
 
 [![pypi](https://img.shields.io/pypi/v/google-browser-scraper?style=flat-square)](https://pypi.org/project/google-browser-scraper/)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](https://pypi.org/project/google-browser-scraper/)
 [![tests](https://img.shields.io/github/actions/workflow/status/nodemaven/google-browser-scraper/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/nodemaven/google-browser-scraper/actions/workflows/ci.yml)
 [![license](https://img.shields.io/pypi/l/google-browser-scraper?style=flat-square)](https://opensource.org/licenses/MIT)
 
-Self-hosted Google search scraper for Python. Scrape Google search results (SERP)
-with a real Chrome browser and your own residential proxy, and get clean JSON
-back. Use it as a CLI, a Python library, a local HTTP API, or an MCP server
-that gives AI agents live Google search.
+<a href="https://devhunt.org/tool/google-search-scraper"><img src="https://devhunt.org/badge/google-search-scraper.svg" alt="Google Browser Scraper on DevHunt" height="44"></a>
+
+[Quickstart](#quickstart) · [Output](#what-you-get) · [HTTP API](#run-it-as-an-api) · [MCP](#use-it-from-an-ai-agent-mcp) · [Docker](#docker) · [How it works](#how-it-works) · [Options](#options)
+
+</div>
+
+<br>
+
+Scrape Google search results (SERP) with a real Chrome browser and your own
+residential proxy, and get clean JSON back. Use it as a CLI, a Python library,
+a local HTTP API, or an MCP server that gives AI agents live Google search.
 
 Plain HTTP is no longer a reliable way to scrape Google: it often expects a
 browser that runs JavaScript, and a fresh browser on a fresh proxy exit can be
 refused quickly. This tool takes a browser path instead. It warms a sticky proxy
 session with ordinary browsing, opens Google's results page for each query in
 that browser, checks whether Google served results or refused, and writes one
-JSON record per results page. Captchas, blocks and failures are reported as such, never as "no results".
-
-`google-browser-scraper doctor` shows what your machine looks like to a website.
+JSON record per results page. Captchas, blocks and failures are reported as
+such, never as "no results".
 
 ## Features
 
-- Real browser scraping: real Chrome via Patchright, with a warm-up before every new identity
-- Bring your own proxy: any residential proxy with sticky sessions, built-in [NodeMaven](https://go.nodemaven.com/ghgooglesearch) support
-- Self-hosted SERP API alternative with JSON: `organic_results`, `ads`, `related_questions`, `related_searches`, `pagination`
-- Honest failures: captchas and blocks come back labeled, not as empty results
-- Cost tracking: bytes per page and cost per 1000 pages in every run summary
-- Four ways to run it: CLI, Python library, HTTP API, MCP server for AI agents
-- Docker image for self-hosted deployment
+- **Real browser scraping:** real Chrome via Patchright, with a warm-up before every new identity
+- **Bring your own proxy:** any residential proxy with sticky sessions, built-in [NodeMaven](https://go.nodemaven.com/ghgooglesearch) support
+- **SERP API alternative:** JSON with `organic_results`, `ads`, `related_questions`, `related_searches`, `pagination`
+- **Honest failures:** captchas and blocks come back labeled, not as empty results
+- **Cost tracking:** bytes per page and cost per 1000 pages in every run summary
+- **Four ways to run it:** CLI, Python library, HTTP API, MCP server for AI agents
+- **Docker image** for self-hosted deployment
 
 ## Use cases
 
@@ -42,7 +50,7 @@ JSON record per results page. Captchas, blocks and failures are reported as such
 
 ## Install
 
-```
+```bash
 pip install google-browser-scraper
 patchright install chromium
 ```
@@ -52,24 +60,10 @@ patchright install chromium
 You need a residential proxy with **sticky sessions**. Put `{session}` where
 your provider expects a session id in the username:
 
-```
+```bash
 google-browser-scraper search "best running shoes" \
   --proxy "http://USER-session-{session}:PASS@gate.example.com:7000" \
   -o results.jsonl
-```
-
-Success is a `results.jsonl` with one JSON object per results page:
-
-```json
-{
-  "search_metadata": {"status": "Success", "page_verdict": "ok"},
-  "search_parameters": {"engine": "google", "q": "best running shoes", "page": 1},
-  "organic_results": [
-    {"position": 1, "title": "...", "link": "https://...", "snippet": "..."}
-  ],
-  "related_questions": [{"question": "..."}],
-  "exit": {"session": "...", "queries_on_exit": 1, "bytes": "..."}
-}
 ```
 
 The first query takes a few minutes, because a new exit is warmed up first, and
@@ -80,7 +74,7 @@ hosts that took most of it, is printed at the end of every run.
 With [NodeMaven](https://go.nodemaven.com/ghgooglesearch) residential proxies, the
 session id is handled for you and the credentials come from the environment:
 
-```
+```bash
 pip install "google-browser-scraper[nodemaven]"
 export NODEMAVEN_LOGIN=... NODEMAVEN_PASSWORD=...
 google-browser-scraper search -f queries.txt --nodemaven --country us -o results.jsonl
@@ -88,7 +82,7 @@ google-browser-scraper search -f queries.txt --nodemaven --country us -o results
 
 To try it without a proxy, use your own connection:
 
-```
+```bash
 google-browser-scraper search "best running shoes" --no-proxy
 ```
 
@@ -109,6 +103,20 @@ for page in Scraper(proxy, Settings(pages=2)).run(["best running shoes"]):
 
 ## What you get
 
+One JSON object per results page:
+
+```json
+{
+  "search_metadata": {"status": "Success", "page_verdict": "ok"},
+  "search_parameters": {"engine": "google", "q": "best running shoes", "page": 1},
+  "organic_results": [
+    {"position": 1, "title": "...", "link": "https://...", "snippet": "..."}
+  ],
+  "related_questions": [{"question": "..."}],
+  "exit": {"session": "...", "queries_on_exit": 1, "bytes": "..."}
+}
+```
+
 The schema is intentionally SerpApi-like: `organic_results`, `ads`,
 `related_questions`, `related_searches`, `pagination` and `search_metadata`, so
 simple consumers can often switch with minimal mapping. Knowledge panels,
@@ -117,72 +125,14 @@ shopping, images and other special blocks are not parsed.
 Each record also has an `exit` block: which proxy session answered and how many
 bytes the page cost. `search_metadata.timings` says where the page's time went,
 in seconds per step (`type`, `load`, `ready`, `read`, `parse`, and `links`, which
-overlaps the next query and is not part of `total_time_taken`). A query
-that failed is a record too, with an `error`.
-`--format csv` writes the organic results as a table, and `--price-per-gb` adds
-the cost per 1000 pages to the summary.
-
-## How it works
-
-1. **New identity**: a sticky proxy session and a fresh browser profile.
-2. **Warm-up**: a few ordinary pages, staying on each for 20-45 seconds.
-3. **Search**: each query opens Google's results page directly, which is
-   faster than the search box and skips the autocomplete traffic of typing.
-   `--direct follow-ups` sends an exit's first query through the box and
-   `--direct none` every query; `--input` sets how a query goes into the box
-   (`type` key by key, `insert` all at once, `words` word by word).
-4. **Check before parsing**: the page is classified first, so a captcha or a
-   block is reported as one and never parsed as an empty result.
-5. **Keep or drop**: an exit Google answers is reused for the next queries; an
-   exit it refuses is dropped and the query is retried on a new one. If exit
-   after exit is refused, the run stops instead of spending more traffic.
-
-A served exit is kept for up to 50 queries (`--max-per-exit`). Every new exit
-pays for a warm-up, so a short cap mostly buys more warm-up traffic. A browser
-error on a search is retried once on the same exit (through Google's front page
-when queries go through the search box) before the exit is dropped; a network
-error drops it at once.
-
-`--workers N` searches on N exits at once, one browser each, sharing one list
-of queries. Each browser needs memory and CPU of its own. The run stops when
-exit after exit is refused or unreachable with no worker served in between.
-
-The command line copies the cookies of the first exit Google serves and
-starts up to 10 new exits from that copy (`--clone N`, `--clone 0` turns it
-off), on new sticky sessions, instead of warming each one; all workers share
-the copy. Google's acceptance follows the cookies more than the address, so a
-copy usually starts out served, and costs a few MB instead of a full warm-up.
-Copying stops after N copies in a row are refused on their first query
-(`--clone-refusals N`, default 1; a served copy resets the count); the copied
-cookies are used for three hours at most (`--clone-max-age`). A copy waits 40-60 seconds
-after its browser starts before the first search.
-
-`--spare 1` warms the next exit in the background once the current one is
-served, so a retired exit is replaced without waiting for a warm-up. A spare
-costs a warm-up's traffic whether it is used or not.
-
-Google wraps result links in encrypted `/goto` redirects. Each one is resolved
-with a small request through a separate short-lived proxy session, a few at a
-time, so link resolution does not touch the warmed browser session. It runs in
-the background while the browser goes on to the next query; records still come
-out in the order each browser searched them. `--no-resolve-links` skips it.
-
-Traffic goes through a small local relay that counts bytes and blocks a large
-model download Chrome otherwise makes on every fresh profile.
-
-The defaults come from measurements in
-[proxy-benchmark](https://github.com/nodemaven/proxy-benchmark).
-
-## Proxies
-
-Any provider with sticky sessions works through `--proxy` and a `{session}`
-placeholder. A proxy without one is accepted with a warning: if the exit changes
-on every request, warming it does nothing. SOCKS5 needs an IP-whitelisted
-endpoint, because Chrome cannot send a SOCKS5 username and password.
+overlaps the next query and is not part of `total_time_taken`). A query that
+failed is a record too, with an `error`. `--format csv` writes the organic
+results as a table, and `--price-per-gb` adds the cost per 1000 pages to the
+summary.
 
 ## Run it as an API
 
-```
+```bash
 google-browser-scraper serve --nodemaven --country us --prewarm
 curl "http://127.0.0.1:8000/search.json?q=best+running+shoes"
 ```
@@ -209,7 +159,7 @@ It exposes one tool, `google_search(query, pages)`.
 
 ## Docker
 
-```
+```bash
 docker build -t google-browser-scraper .
 docker run --rm google-browser-scraper doctor
 docker run --rm -p 8000:8000 -e GBS_API_KEY=change-me \
@@ -217,9 +167,73 @@ docker run --rm -p 8000:8000 -e GBS_API_KEY=change-me \
   google-browser-scraper serve --host 0.0.0.0
 ```
 
+## How it works
+
+1. **New identity:** a sticky proxy session and a fresh browser profile.
+2. **Warm-up:** a few ordinary pages, staying on each for 20-45 seconds.
+3. **Search:** each query opens Google's results page directly, which is
+   faster than the search box and skips the autocomplete traffic of typing.
+4. **Check before parsing:** the page is classified first, so a captcha or a
+   block is reported as one and never parsed as an empty result.
+5. **Keep or drop:** an exit Google answers is reused for the next queries; an
+   exit it refuses is dropped and the query is retried on a new one. If exit
+   after exit is refused, the run stops instead of spending more traffic.
+
+**Holding exits.** A served exit is kept for up to 50 queries. Every new exit
+pays for a warm-up, so a short cap mostly buys more warm-up traffic. A browser
+error on a search is retried once on the same exit before the exit is dropped;
+a network error drops it at once.
+
+**Copying cookies.** The command line copies the cookies of the first exit
+Google serves and starts new exits from that copy, on new sticky sessions,
+instead of warming each one; all workers share the copy. Google's acceptance
+follows the cookies more than the address, so a copy usually starts out served
+and costs a few MB instead of a full warm-up. A copy waits 40-60 seconds after
+its browser starts before the first search.
+
+**Result links.** Google wraps result links in encrypted `/goto` redirects.
+Each one is resolved with a small request through a separate short-lived proxy
+session, a few at a time, in the background while the browser goes on to the
+next query. Records still come out in the order each browser searched them.
+
+**Traffic.** Everything goes through a small local relay that counts bytes per
+host and blocks a large model download Chrome otherwise makes on every fresh
+profile.
+
+The defaults come from measurements in
+[proxy-benchmark](https://github.com/nodemaven/proxy-benchmark).
+
+## Options
+
+| Option | Default | What it does |
+|---|---|---|
+| `--workers N` | 1 | Search on N exits at once, one browser each, from one list of queries |
+| `--max-per-exit N` | 50 | Queries before a served exit is retired |
+| `--clone N` | 10 | New exits started from copied cookies; `0` turns copying off |
+| `--clone-max-age` | 180 | Minutes copied cookies stay in use |
+| `--clone-refusals N` | 1 | Copies refused in a row on their first query that end the copying |
+| `--spare N` | 0 | Exits warmed in the background so a retired one is replaced at once; each costs a warm-up |
+| `--direct` | `all` | Open results pages directly: `all`, `follow-ups` (all but an exit's first query), `none` |
+| `--input` | `type` | How a query goes into the search box: `type`, `insert`, `words` |
+| `--gap LOW,HIGH` | 2,5 | Seconds between queries on one exit |
+| `--pages N` | 1 | Result pages per query |
+| `--format` | `jsonl` | `jsonl` or `csv` |
+| `--price-per-gb` | | Your proxy price, to print the cost per 1000 pages |
+| `--no-resolve-links` | | Keep result links as Google `/goto` redirects |
+| `--save-html DIR` | | Keep every page's HTML, gzipped |
+
+`google-browser-scraper search --help` lists the rest.
+
+## Proxies
+
+Any provider with sticky sessions works through `--proxy` and a `{session}`
+placeholder. A proxy without one is accepted with a warning: if the exit changes
+on every request, warming it does nothing. SOCKS5 needs an IP-whitelisted
+endpoint, because Chrome cannot send a SOCKS5 username and password.
+
 ## Check your machine
 
-```
+```bash
 google-browser-scraper doctor
 ```
 
@@ -247,17 +261,17 @@ run it.
 ## Adding an engine
 
 An engine joins this tool only after it has been measured on
-[proxy-benchmark](https://github.com/nodemaven/proxy-benchmark): add it there,
-run the warm-up ladder against Google -
+[proxy-benchmark](https://github.com/nodemaven/proxy-benchmark). Add it there
+and run the warm-up ladder against Google:
 
-```
+```bash
 python scripts/run_ladder.py --engines your-engine
 ```
 
-- and open a pull request here with the run file. The ladder runs identities
+Then open a pull request here with the run file. The ladder runs identities
 with and without the warm-up in the same hours, so the result shows whether the
 engine actually gets served, not whether it got lucky once.
 
 ## License
 
-MIT
+[MIT](https://github.com/nodemaven/google-browser-scraper/blob/main/LICENSE)
