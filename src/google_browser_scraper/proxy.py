@@ -191,6 +191,6 @@ class NodeMavenDemoSource:
         """Delete the provisioned sub-user, unless `keep` is set. Idempotent."""
         if self._closed:
             return
-        self._closed = True
         if not keep:
             self._client.delete_sub_user(self._sub_user_id)
+        self._closed = True
