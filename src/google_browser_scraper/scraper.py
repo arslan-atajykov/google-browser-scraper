@@ -23,7 +23,6 @@ first query ends the copying.
 from __future__ import annotations
 
 import gzip
-import json
 import os
 import random
 import re
@@ -206,8 +205,6 @@ class Settings:
     #: copy that is served resets the count. Below `breaker`, which would stop
     #: the run first.
     clone_refusals: int = 1
-    #: Append a JSON line per refused exit, keyed by session (the exit IP is never known).
-    refusal_log: str | None = None
 
     def __post_init__(self) -> None:
         engines.get(self.engine)
@@ -715,8 +712,6 @@ class Scraper:
                 self._templates.copy_refused(identity.template, self._emit)
             last_verdict, last_error = verdict, None
             self.stats.exits_refused += verdict.refused
-            if verdict.refused:
-                self._log_refusal(identity, verdict.kind)
             self._retire(verdict.kind)
             self._count_failure()
         self.stats.queries_failed += 1
@@ -774,8 +769,6 @@ class Scraper:
             saved = self._keep(fetched, query, page, verdict)
             if not verdict.served:
                 self.stats.exits_refused += verdict.refused
-                if verdict.refused:
-                    self._log_refusal(identity, verdict.kind)
                 record = self._failed(query, page, verdict, verdict.reason, identity)
                 self._retire(verdict.kind)
                 yield record
@@ -1151,22 +1144,6 @@ class Scraper:
 
     def _event(self, kind: str, identity: Identity, **fields) -> None:
         self._emit({"event": kind, "session": identity.session_id, **fields})
-
-    def _log_refusal(self, identity: Identity, reason: str) -> None:
-        if not self.settings.refusal_log:
-            return
-        line = json.dumps(
-            {
-                "ts": time.time(),
-                "session": identity.session_id,
-                "reason": reason,
-                "clone": identity.clone,
-                "queries_on_exit": identity.queries,
-            }
-        )
-        with open(self.settings.refusal_log, "a") as handle:
-            handle.write(line + "\n")
-            handle.flush()
 
     def _count_failure(self) -> None:
         self._breaker.failed()
