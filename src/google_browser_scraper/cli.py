@@ -114,10 +114,10 @@ def _scraper_options(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--traffic-limit-mb",
         type=float,
-        default=200.0,
+        default=300.0,
         metavar="MB",
         help="traffic cap on a --nodemaven-demo sub-user; a fresh warm-up alone uses ~60 "
-        "(default 200)",
+        "(default 300)",
     )
     p.add_argument(
         "--keep-subuser",

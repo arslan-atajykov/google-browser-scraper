@@ -87,7 +87,7 @@ warm-up alone uses about 60 MB, so keep the cap well above that:
 
 ```bash
 export NODEMAVEN_API_KEY=...
-google-browser-scraper search -f queries.txt --nodemaven-demo --traffic-limit-mb 200 -o results.jsonl
+google-browser-scraper search -f queries.txt --nodemaven-demo --traffic-limit-mb 300 -o results.jsonl
 ```
 
 To try it without a proxy, use your own connection:

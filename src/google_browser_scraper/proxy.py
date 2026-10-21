@@ -129,7 +129,7 @@ class NodeMavenDemoSource:
     def __init__(
         self,
         *,
-        traffic_limit_mb: float = 200,
+        traffic_limit_mb: float = 300,
         country: str | None = None,
         api_key: str | None = None,
         **params: str,
