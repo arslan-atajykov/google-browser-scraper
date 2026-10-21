@@ -129,6 +129,14 @@ def test_a_query_file_saved_with_a_byte_order_mark(tmp_path, monkeypatch):
     assert asked == ["best pizza", "kimchi"]
 
 
+def test_verbose_events_carry_a_timestamp(capsys):
+    args = cli._parser().parse_args(["search", "q", "--no-proxy", "-v"])
+    scraper, _ = cli._build(args)
+    scraper._emit({"event": "retired", "session": "abc"})
+    event = json.loads(capsys.readouterr().err.splitlines()[-1])
+    assert event["event"] == "retired" and isinstance(event["ts"], float)
+
+
 def test_copies_are_on_by_default_and_can_be_turned_off():
     parser = cli._parser()
     assert parser.parse_args(["search", "q", "--no-proxy"]).clone == 10
