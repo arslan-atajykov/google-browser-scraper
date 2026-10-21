@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, browser, engines, warmup
@@ -281,7 +282,11 @@ def _build(args, *, pages: int = 1, worker: int | None = None) -> tuple[Scraper,
         tag = {} if worker is None else {"worker": worker}
 
         def _log(event: dict) -> None:
-            print(json.dumps({**tag, **event}), file=sys.stderr, flush=True)
+            print(
+                json.dumps({"ts": round(time.time(), 3), **tag, **event}),
+                file=sys.stderr,
+                flush=True,
+            )
 
         log = _log
 
