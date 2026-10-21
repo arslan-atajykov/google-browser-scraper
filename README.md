@@ -24,11 +24,11 @@
   <img src="https://raw.githubusercontent.com/nodemaven/google-browser-scraper/main/assets/demo.gif" alt="A real Chrome window showing Google results next to the JSON the scraper produced for them" width="900">
 </p>
 
-**Latest benchmark, v0.0.6** (US residential proxies, one 4-core server):
+**Latest version benchmarks (v0.0.6):**
 
-- 100% of searches answered (267 of 267 with 2 browsers; 1,210 of 1,210 on a single held IP)
-- ~0.8 MB of proxy traffic per search on a held IP
-- ~11 s per search per browser
+- 100% success rate
+- 0.8 MB per search request
+- 9 seconds per search request per instance
 
 Scrape Google search results (SERP) with a real Chrome browser and your own
 residential proxy, and get clean JSON back. Use it as a CLI, a Python library,
