@@ -61,7 +61,11 @@ class _FakeNodeMavenProxy:
         return self
 
     def playwright(self):
-        return {"server": "http://gate.example.com:7000", "username": self.login}
+        return {
+            "server": "http://gate.example.com:7000",
+            "username": self.login,
+            "password": self.password,
+        }
 
 
 def _fake_client_cls(created, deleted):
@@ -69,8 +73,10 @@ def _fake_client_cls(created, deleted):
         def __init__(self, api_key=None):
             self.api_key = api_key
 
-        def create_sub_user(self, proxy_username, proxy_password, *, traffic_limit=None, **kw):
-            created.append((proxy_username, proxy_password, traffic_limit))
+        def create_sub_user(
+            self, proxy_username, proxy_password, *, traffic_limit=None, is_traffic_limited=None
+        ):
+            created.append((proxy_username, proxy_password, traffic_limit, is_traffic_limited))
             return {
                 "id": "sub-1",
                 "proxy_username": proxy_username,
@@ -99,9 +105,13 @@ def test_demo_source_provisions_a_sub_user_and_deletes_it_on_close(monkeypatch):
     source = NodeMavenDemoSource(traffic_limit_mb=10, country="us")
     assert source.sticky
     assert "capped" in source.describe()
-    assert len(created) == 1 and created[0][2] == 10 * 1024 * 1024
-    proxy = source.for_session("abc")
-    assert proxy["username"] == created[0][0]
+    username, password, limit, limited = created[0]
+    assert len(created) == 1 and limit == 10 * 1024 * 1024 and limited is True
+    assert source.for_session("abc") == {
+        "server": "http://gate.example.com:7000",
+        "username": username,
+        "password": password,
+    }
     source.close()
     assert deleted == ["sub-1"]
 

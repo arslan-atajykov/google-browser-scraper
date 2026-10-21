@@ -170,6 +170,26 @@ def test_workers_share_one_demo_sub_user(monkeypatch):
     assert len(made) == 1 and given == made * 3 and closed == [False]
 
 
+def test_a_bad_output_path_still_deletes_the_demo_sub_user(tmp_path, monkeypatch):
+    closed = []
+
+    class Demo:
+        sticky = True
+
+        def __init__(self, **kw):
+            pass
+
+        def close(self, keep=False):
+            closed.append(keep)
+
+    monkeypatch.setattr(cli, "NodeMavenDemoSource", Demo)
+    monkeypatch.setattr(cli, "_build", lambda args, proxy, **kw: (None, ""))
+    missing = tmp_path / "no-such-dir" / "out.jsonl"
+    with pytest.raises(OSError):
+        cli.main(["search", "q", "--nodemaven-demo", "-o", str(missing)])
+    assert closed == [False]
+
+
 def test_copies_are_on_by_default_and_can_be_turned_off():
     parser = cli._parser()
     assert parser.parse_args(["search", "q", "--no-proxy"]).clone == 10
