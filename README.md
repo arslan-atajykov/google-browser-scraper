@@ -81,9 +81,9 @@ google-browser-scraper search -f queries.txt --nodemaven --country us -o results
 ```
 
 To cap a run's traffic, `--nodemaven-demo` creates a sub-user with a traffic limit
-from your dashboard API key and deletes it when the run ends. The account needs
-sub-users enabled. A fresh warm-up alone uses about 60 MB, so keep the cap well
-above that:
+from your dashboard API key, shares it across workers, and deletes it when the run
+ends (`--keep-subuser` keeps it). The account needs sub-users enabled. A fresh
+warm-up alone uses about 60 MB, so keep the cap well above that:
 
 ```bash
 export NODEMAVEN_API_KEY=...
