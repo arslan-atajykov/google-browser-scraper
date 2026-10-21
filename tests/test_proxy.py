@@ -115,6 +115,25 @@ def test_demo_source_close_with_keep_does_not_delete(monkeypatch):
     assert deleted == []
 
 
+def test_demo_source_close_retries_a_failed_delete(monkeypatch):
+    created, deleted = [], []
+    _install_fake_nodemaven(monkeypatch, created, deleted)
+    monkeypatch.setenv("NODEMAVEN_API_KEY", "key-123")
+    source = NodeMavenDemoSource()
+    delete, failures = source._client.delete_sub_user, [OSError("timeout")]
+
+    def flaky(sub_user_id):
+        if failures:
+            raise failures.pop()
+        delete(sub_user_id)
+
+    source._client.delete_sub_user = flaky
+    with pytest.raises(OSError):
+        source.close()
+    source.close()
+    assert deleted == ["sub-1"]
+
+
 def test_demo_source_needs_an_api_key(monkeypatch):
     _install_fake_nodemaven(monkeypatch, [], [])
     monkeypatch.delenv("NODEMAVEN_API_KEY", raising=False)
