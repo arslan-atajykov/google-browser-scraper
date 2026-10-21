@@ -8,7 +8,10 @@ import os
 import shlex
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from . import __version__, browser, engines, warmup
 from .classify import classify
@@ -229,12 +232,38 @@ def _scraper_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("-v", "--verbose", action="store_true", help="log identities to stderr")
 
 
-def _build(args, *, pages: int = 1, worker: int | None = None) -> tuple[Scraper, str]:
+@contextmanager
+def _proxy_source(args) -> Iterator[Any]:
+    """One proxy source per run, shared by every worker; a demo sub-user is deleted on exit."""
     if args.country and not (args.nodemaven or args.nodemaven_demo):
         raise ValueError(
             "--country only applies to --nodemaven / --nodemaven-demo; put the country "
             "in your provider's proxy URL instead"
         )
+    if args.nodemaven:
+        proxy = NodeMavenSource(country=args.country)
+    elif args.nodemaven_demo:
+        proxy = NodeMavenDemoSource(country=args.country, traffic_limit_mb=args.traffic_limit_mb)
+    elif args.no_proxy:
+        proxy = None
+    else:
+        url = args.proxy or os.environ.get("GBS_PROXY")
+        if not url:
+            raise ValueError("give --proxy, --nodemaven, --nodemaven-demo or --no-proxy")
+        proxy = ProxyTemplate(url)
+    if proxy is not None and not proxy.sticky:
+        print(
+            "warning: the proxy URL has no {session} placeholder, so the exit may change "
+            "between requests and warming it does nothing",
+            file=sys.stderr,
+        )
+    try:
+        yield proxy
+    finally:
+        _cleanup_subuser(proxy, args.keep_subuser)
+
+
+def _build(args, proxy, *, pages: int = 1, worker: int | None = None) -> tuple[Scraper, str]:
     browser_args = tuple(args.browser_args) + tuple(
         shlex.split(os.environ.get("GBS_BROWSER_ARGS", ""))
     )
@@ -259,24 +288,6 @@ def _build(args, *, pages: int = 1, worker: int | None = None) -> tuple[Scraper,
         save_html=_html_dir(args.save_html, worker),
         resolve_links=not args.no_resolve_links,
     )
-    # Created after Settings validates, so bad flags can't leak a sub-user.
-    if args.nodemaven:
-        proxy = NodeMavenSource(country=args.country)
-    elif args.nodemaven_demo:
-        proxy = NodeMavenDemoSource(country=args.country, traffic_limit_mb=args.traffic_limit_mb)
-    elif args.no_proxy:
-        proxy = None
-    else:
-        url = args.proxy or os.environ.get("GBS_PROXY")
-        if not url:
-            raise ValueError("give --proxy, --nodemaven, --nodemaven-demo or --no-proxy")
-        proxy = ProxyTemplate(url)
-    if proxy is not None and not proxy.sticky:
-        print(
-            "warning: the proxy URL has no {session} placeholder, so the exit may change "
-            "between requests and warming it does nothing",
-            file=sys.stderr,
-        )
     log = None
     if args.verbose:
         tag = {} if worker is None else {"worker": worker}
@@ -302,40 +313,41 @@ def _search(args) -> int:
         queries += args.file.read_text(encoding="utf-8-sig").splitlines()
     if not any(q.strip() for q in queries):
         raise ValueError("no queries given")
-    if args.workers != 1:
-        scraper = Pool(lambda i: _build(args, pages=args.pages, worker=i)[0], args.workers)
-    else:
-        scraper, _ = _build(args, pages=args.pages)
-    stream = args.output.open("w", encoding="utf-8", newline="") if args.output else sys.stdout
-    writer = open_writer(args.format, stream)
-    failed, code = 0, 0
-    try:
-        for record in scraper.run(queries):
-            failed += record["search_metadata"]["status"] != "Success"
-            writer.write(record)
-    except ExitsRefused as exc:
-        print(f"stopped: {exc}", file=sys.stderr)
-        code = 3
-    finally:
-        writer.close()
-        not_run = getattr(scraper, "not_run", [])
-        if not_run:
-            print(f"not run: {len(not_run)} queries", file=sys.stderr)
-        if args.output:
-            stream.close()
-        print("summary: " + json.dumps(scraper.stats.summary(args.price_per_gb)), file=sys.stderr)
-        _cleanup_subusers(scraper, args.keep_subuser)
+    with _proxy_source(args) as proxy:
+        if args.workers != 1:
+            scraper = Pool(
+                lambda i: _build(args, proxy, pages=args.pages, worker=i)[0], args.workers
+            )
+        else:
+            scraper, _ = _build(args, proxy, pages=args.pages)
+        stream = args.output.open("w", encoding="utf-8", newline="") if args.output else sys.stdout
+        writer = open_writer(args.format, stream)
+        failed, code = 0, 0
+        try:
+            for record in scraper.run(queries):
+                failed += record["search_metadata"]["status"] != "Success"
+                writer.write(record)
+        except ExitsRefused as exc:
+            print(f"stopped: {exc}", file=sys.stderr)
+            code = 3
+        finally:
+            writer.close()
+            not_run = getattr(scraper, "not_run", [])
+            if not_run:
+                print(f"not run: {len(not_run)} queries", file=sys.stderr)
+            if args.output:
+                stream.close()
+            summary = scraper.stats.summary(args.price_per_gb)
+            print("summary: " + json.dumps(summary), file=sys.stderr)
     return code or (4 if failed else 0)
 
 
 def _serve(args) -> int:
     from .server import Worker, serve
 
-    worker = Worker(lambda: _build(args)[0], prewarm=args.prewarm).start()
-    try:
+    with _proxy_source(args) as proxy:
+        worker = Worker(lambda: _build(args, proxy)[0], prewarm=args.prewarm).start()
         serve(worker, host=args.host, port=args.port, max_pages=args.max_pages)
-    finally:
-        _cleanup_subuser(getattr(worker.scraper, "proxy", None), args.keep_subuser)
     return 0
 
 
@@ -343,12 +355,12 @@ def _mcp(args) -> int:
     from .mcp import McpServer
     from .server import Worker
 
-    worker = Worker(lambda: _build(args)[0], prewarm=args.prewarm).start()
-    try:
-        McpServer(worker).serve()
-    finally:
-        worker.stop()
-        _cleanup_subuser(getattr(worker.scraper, "proxy", None), args.keep_subuser)
+    with _proxy_source(args) as proxy:
+        worker = Worker(lambda: _build(args, proxy)[0], prewarm=args.prewarm).start()
+        try:
+            McpServer(worker).serve()
+        finally:
+            worker.stop()
     return 0
 
 
@@ -360,12 +372,6 @@ def _cleanup_subuser(proxy, keep: bool) -> None:
         close(keep=keep)
     except Exception as exc:
         print(f"warning: could not delete the provisioned sub-user: {exc}", file=sys.stderr)
-
-
-def _cleanup_subusers(scraper, keep: bool) -> None:
-    """`scraper` is a single Scraper, or a Pool with one proxy per worker."""
-    for s in getattr(scraper, "_scrapers", None) or [scraper]:
-        _cleanup_subuser(getattr(s, "proxy", None), keep)
 
 
 def _parse(args) -> int:
