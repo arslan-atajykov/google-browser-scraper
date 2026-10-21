@@ -169,12 +169,6 @@ def _scraper_options(p: argparse.ArgumentParser) -> None:
         help="copies refused on their first query, in a row, that end the copying (default 1)",
     )
     p.add_argument(
-        "--refusal-log",
-        type=Path,
-        metavar="PATH",
-        help="append one JSON line per exit Google refuses, to measure how long a flag lasts",
-    )
-    p.add_argument(
         "--input",
         choices=browser.INPUT_MODES,
         default="type",
@@ -252,7 +246,6 @@ def _build(args, *, pages: int = 1, worker: int | None = None) -> tuple[Scraper,
         clones=args.clone,
         clone_max_age=args.clone_max_age * 60,
         clone_refusals=args.clone_refusals,
-        refusal_log=str(args.refusal_log) if args.refusal_log else None,
         input=args.input,
         direct=args.direct,
         stop_after_read=args.stop_after_read,
