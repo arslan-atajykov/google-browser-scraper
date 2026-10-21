@@ -122,7 +122,7 @@ def test_a_query_file_saved_with_a_byte_order_mark(tmp_path, monkeypatch):
             asked.extend(queries)
             return iter(())
 
-    monkeypatch.setattr(cli, "_build", lambda args, **kw: (Recorder(), ""))
+    monkeypatch.setattr(cli, "_build", lambda args, proxy, **kw: (Recorder(), ""))
     path = tmp_path / "q.txt"
     path.write_bytes("\ufeffbest pizza\nkimchi\n".encode("utf-8"))
     assert cli.main(["search", "-f", str(path), "--no-proxy"]) == 0
@@ -131,10 +131,43 @@ def test_a_query_file_saved_with_a_byte_order_mark(tmp_path, monkeypatch):
 
 def test_verbose_events_carry_a_timestamp(capsys):
     args = cli._parser().parse_args(["search", "q", "--no-proxy", "-v"])
-    scraper, _ = cli._build(args)
+    scraper, _ = cli._build(args, None)
     scraper._emit({"event": "retired", "session": "abc"})
     event = json.loads(capsys.readouterr().err.splitlines()[-1])
     assert event["event"] == "retired" and isinstance(event["ts"], float)
+
+
+def test_workers_share_one_demo_sub_user(monkeypatch):
+    made, closed, given = [], [], []
+
+    class Demo:
+        sticky = True
+
+        def __init__(self, **kw):
+            made.append(self)
+
+        def close(self, keep=False):
+            closed.append(keep)
+
+    class FakePool:
+        stats = type("Stats", (), {"summary": lambda self, price: {}})()
+
+        def __init__(self, make, workers):
+            for i in range(workers):
+                make(i)
+
+        def run(self, queries):
+            return iter(())
+
+    def build(args, proxy, **kw):
+        given.append(proxy)
+        return None, ""
+
+    monkeypatch.setattr(cli, "NodeMavenDemoSource", Demo)
+    monkeypatch.setattr(cli, "Pool", FakePool)
+    monkeypatch.setattr(cli, "_build", build)
+    assert cli.main(["search", "q", "--nodemaven-demo", "--workers", "3"]) == 0
+    assert len(made) == 1 and given == made * 3 and closed == [False]
 
 
 def test_copies_are_on_by_default_and_can_be_turned_off():
