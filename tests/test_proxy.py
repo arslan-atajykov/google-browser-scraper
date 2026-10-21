@@ -122,6 +122,16 @@ def test_demo_source_needs_an_api_key(monkeypatch):
         NodeMavenDemoSource()
 
 
+@pytest.mark.parametrize("cap", [0, -5, float("inf"), float("nan")])
+def test_demo_source_refuses_a_bad_cap_before_provisioning(monkeypatch, cap):
+    created = []
+    _install_fake_nodemaven(monkeypatch, created, [])
+    monkeypatch.setenv("NODEMAVEN_API_KEY", "key-123")
+    with pytest.raises(ValueError):
+        NodeMavenDemoSource(traffic_limit_mb=cap)
+    assert created == []
+
+
 def test_demo_source_refuses_an_sdk_with_no_create_sub_user(monkeypatch):
     monkeypatch.setenv("NODEMAVEN_API_KEY", "key-123")
     fake_pkg = types.ModuleType("nodemaven")

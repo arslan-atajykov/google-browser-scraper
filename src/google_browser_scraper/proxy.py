@@ -134,6 +134,8 @@ class NodeMavenDemoSource:
         api_key: str | None = None,
         **params: str,
     ) -> None:
+        if not 0 < traffic_limit_mb < float("inf"):
+            raise ValueError("traffic_limit_mb must be a positive, finite number")
         try:
             from nodemaven import Proxy
             from nodemaven.api import Client
