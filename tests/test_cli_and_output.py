@@ -153,10 +153,11 @@ def test_workers_share_one_demo_sub_user(monkeypatch):
         stats = type("Stats", (), {"summary": lambda self, price: {}})()
 
         def __init__(self, make, workers):
-            for i in range(workers):
-                make(i)
+            self.make, self.workers = make, workers
 
         def run(self, queries):
+            for i in range(self.workers):
+                self.make(i)
             return iter(())
 
     def build(args, proxy, **kw):
